@@ -4,7 +4,10 @@ import android.app.*
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.graphics.PixelFormat
 import android.os.*
 import android.speech.RecognitionListener
@@ -20,9 +23,7 @@ import java.text.Normalizer
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
-import org.vosk.android.SpeechService
 import org.vosk.android.StorageService
-import org.vosk.android.RecognitionListener as VoskListener
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -48,7 +49,7 @@ class OverlayService : Service(), RecognitionListener {
     private var pos = 0
     private var anchor = 0
     private var model: Model? = null
-    private var vosk: SpeechService? = null
+    @Volatile private var recOn = false
     private var muted = false
     private var modelFailed = false
     private val hl = ForegroundColorSpan(0xFFFFEB3B.toInt())
@@ -232,25 +233,44 @@ class OverlayService : Service(), RecognitionListener {
         muteBeep(true); listen()
     }
 
-    // Moteur hors ligne : capture le micro avec NOTRE app (priorité accessibilité), sans bip ni coupure
+    // Moteur hors ligne : capture 48 kHz (comme la caméra) puis réduit à 16 kHz pour Vosk
     private fun startVosk() {
-        try {
-            vosk = SpeechService(Recognizer(model, 16000.0f), 16000.0f).also {
-                it.startListening(object : VoskListener {
-                    override fun onPartialResult(hypothesis: String?) { hypothesis?.let { j -> heardJson(j, "partial") } }
-                    override fun onResult(hypothesis: String?) { hypothesis?.let { j -> heardJson(j, "text") } }
-                    override fun onFinalResult(hypothesis: String?) { hypothesis?.let { j -> heardJson(j, "text") } }
-                    override fun onError(exception: Exception?) {}
-                    override fun onTimeout() {}
-                })
-            }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Micro indisponible : ${e.message}", Toast.LENGTH_LONG).show()
-            voice = false; mic.setTextColor(Color.WHITE)
+        val src = getSharedPreferences("t", 0).getInt("src", MediaRecorder.AudioSource.CAMCORDER)
+        val rate = 48000
+        val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        val ar = try { AudioRecord(src, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, rate)) } catch (e: Exception) { null }
+        if (ar == null || ar.state != AudioRecord.STATE_INITIALIZED) {
+            Toast.makeText(this, "Micro indisponible (essayez une autre source micro)", Toast.LENGTH_LONG).show()
+            ar?.release(); voice = false; mic.setTextColor(Color.WHITE); return
         }
+        val rec = Recognizer(model, 16000.0f)
+        recOn = true
+        Thread {
+            val buf = ShortArray(4800)
+            val out = ByteArray(3200)
+            try {
+                ar.startRecording()
+                while (recOn) {
+                    val n = ar.read(buf, 0, buf.size)
+                    if (n <= 0) continue
+                    val m = n / 3
+                    for (i in 0 until m) {
+                        val v = (buf[3 * i] + buf[3 * i + 1] + buf[3 * i + 2]) / 3
+                        out[2 * i] = (v and 0xff).toByte(); out[2 * i + 1] = (v shr 8).toByte()
+                    }
+                    val fin = rec.acceptWaveForm(out, m * 2)
+                    val j = if (fin) rec.result else rec.partialResult
+                    h.post { if (recOn) heardJson(j, if (fin) "text" else "partial") }
+                }
+            } catch (_: Exception) {
+            } finally {
+                try { ar.stop() } catch (_: Exception) {}
+                ar.release(); rec.close()
+            }
+        }.start()
     }
 
-    private fun stopVosk() { try { vosk?.shutdown() } catch (_: Exception) {}; vosk = null }
+    private fun stopVosk() { recOn = false }
 
     private fun heardJson(j: String, key: String) {
         try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t) } catch (_: Exception) {}
