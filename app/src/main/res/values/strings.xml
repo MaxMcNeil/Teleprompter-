@@ -1,0 +1,3 @@
+<resources>
+    <string name="a11y_desc">Permet au prompteur de garder le micro pendant que la caméra enregistre. Aucune donnée de l’écran n’est lue.</string>
+</resources>
