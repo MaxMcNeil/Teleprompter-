@@ -39,11 +39,16 @@ class OverlayService : Service(), RecognitionListener {
     private val st = ArrayList<Int>()
     private val en = ArrayList<Int>()
     private var pos = 0
+    private var anchor = 0
     private val hl = ForegroundColorSpan(0xFFFFEB3B.toInt())
     private val mAccent = Regex("\\p{M}")
     private val mJunk = Regex("[^\\p{L}\\p{N}]")
     private val scroller = object : Runnable {
-        override fun run() { if (auto) { sv.scrollBy(0, speed); h.postDelayed(this, 40) } }
+        override fun run() {
+            if (auto) sv.scrollBy(0, speed)
+            else if (voice && speed > 0 && sv.scrollY < anchor + sv.height / 5) sv.scrollBy(0, speed)
+            if (auto || voice) h.postDelayed(this, 40)
+        }
     }
 
     override fun onBind(i: Intent?): IBinder? = null
@@ -78,15 +83,15 @@ class OverlayService : Service(), RecognitionListener {
         }
         val drag = btn("✥") {}
         mic = btn("🎤") { toggleVoice() }
-        play = btn("▶") { if (voice) toggleVoice(); auto = !auto; play.text = if (auto) "⏸" else "▶"; if (auto) h.post(scroller) }
+        play = btn("▶") { if (voice) toggleVoice(); auto = !auto; play.text = if (auto) "⏸" else "▶"; if (auto) { h.removeCallbacks(scroller); h.post(scroller) } }
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; setBackgroundColor(0xFF3A0000.toInt())
             addView(drag)
             addView(btn("A−") { size = max(14f, size - 3); tv.textSize = size })
             addView(btn("A+") { size = min(90f, size + 3); tv.textSize = size })
             addView(mic); addView(play)
-            addView(btn("🐢") { speed = max(1, speed - 1) })
-            addView(btn("🐇") { speed = min(12, speed + 1) })
+            addView(btn("🐢") { speed = max(0, speed - 1); Toast.makeText(this@OverlayService, "Vitesse : $speed", Toast.LENGTH_SHORT).show() })
+            addView(btn("🐇") { speed = min(12, speed + 1); Toast.makeText(this@OverlayService, "Vitesse : $speed", Toast.LENGTH_SHORT).show() })
             addView(btn("✕") { stopSelf() })
         }
         tv = TextView(this).apply {
@@ -149,7 +154,9 @@ class OverlayService : Service(), RecognitionListener {
         val a = min(pos, n - 1); val b = min(pos + 5, n - 1)
         (tv.text as Spannable).setSpan(hl, st[a], en[b], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         val l = tv.layout ?: return
-        sv.smoothScrollTo(0, max(0, l.getLineTop(l.getLineForOffset(st[a])) - sv.height / 3))
+        val y = max(0, l.getLineTop(l.getLineForOffset(st[a])) - sv.height / 3)
+        anchor = y
+        if (y > sv.scrollY || y < sv.scrollY - sv.height / 3) sv.smoothScrollTo(0, y)
     }
 
     private fun muteBeep(on: Boolean) {
@@ -169,6 +176,7 @@ class OverlayService : Service(), RecognitionListener {
             }
             auto = false; play.text = "▶"
             muteBeep(true)
+            anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
             listen()
         } else { sr?.cancel(); muteBeep(false) }
     }
