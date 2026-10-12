@@ -4,6 +4,7 @@ import android.app.*
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
+import android.media.AudioManager
 import android.graphics.PixelFormat
 import android.os.*
 import android.speech.RecognitionListener
@@ -77,7 +78,7 @@ class OverlayService : Service(), RecognitionListener {
         }
         val drag = btn("✥") {}
         mic = btn("🎤") { toggleVoice() }
-        play = btn("▶") { auto = !auto; play.text = if (auto) "⏸" else "▶"; if (auto) h.post(scroller) }
+        play = btn("▶") { if (voice) toggleVoice(); auto = !auto; play.text = if (auto) "⏸" else "▶"; if (auto) h.post(scroller) }
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; setBackgroundColor(0xFF3A0000.toInt())
             addView(drag)
@@ -151,15 +152,25 @@ class OverlayService : Service(), RecognitionListener {
         sv.smoothScrollTo(0, max(0, l.getLineTop(l.getLineForOffset(st[a])) - sv.height / 3))
     }
 
+    private fun muteBeep(on: Boolean) {
+        val am = getSystemService(AudioManager::class.java)
+        val d = if (on) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE
+        for (st in intArrayOf(AudioManager.STREAM_MUSIC, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM))
+            try { am.adjustStreamVolume(st, d, 0) } catch (_: Exception) {}
+    }
+
     private fun toggleVoice() {
         voice = !voice
         mic.setTextColor(if (voice) 0xFFFFEB3B.toInt() else Color.WHITE)
         if (voice) {
             if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-                Toast.makeText(this, "Reconnaissance vocale indisponible", Toast.LENGTH_LONG).show(); voice = false; return
+                Toast.makeText(this, "Reconnaissance vocale indisponible", Toast.LENGTH_LONG).show(); voice = false
+                mic.setTextColor(Color.WHITE); return
             }
+            auto = false; play.text = "▶"
+            muteBeep(true)
             listen()
-        } else sr?.cancel()
+        } else { sr?.cancel(); muteBeep(false) }
     }
 
     private fun listen() {
@@ -170,7 +181,7 @@ class OverlayService : Service(), RecognitionListener {
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang))
     }
 
-    private fun restart() { if (voice) h.postDelayed({ if (voice) listen() }, 300) }
+    private fun restart() { if (voice) h.postDelayed({ if (voice) listen() }, 150) }
 
     private fun heard(b: Bundle?) {
         b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { onHeard(it) }
@@ -191,7 +202,7 @@ class OverlayService : Service(), RecognitionListener {
             }
             return best
         }
-        var r = find(max(0, pos - 15), min(n, pos + 400))
+        var r = find(max(0, pos - 15), min(n, pos + (if (k == 3) 400 else 60)))
         if (r < 0 && k == 3) r = find(0, n)
         if (r >= 0) { pos = r + 1; show() }
     }
@@ -207,6 +218,7 @@ class OverlayService : Service(), RecognitionListener {
     override fun onResults(b: Bundle?) { heard(b); restart() }
 
     override fun onDestroy() {
+        if (voice) muteBeep(false)
         voice = false; auto = false
         h.removeCallbacksAndMessages(null)
         sr?.destroy()
