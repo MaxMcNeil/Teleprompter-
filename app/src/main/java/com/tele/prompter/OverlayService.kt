@@ -128,7 +128,7 @@ class OverlayService : Service(), RecognitionListener {
             layoutParams = LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.END }
         }
         fun arrow(t: String, a: () -> Unit) = TextView(this).apply {
-            text = t; setTextColor(Color.WHITE); textSize = 24f
+            this.text = t; setTextColor(Color.WHITE); textSize = 24f
             setPadding((22 * dp).toInt(), (6 * dp).toInt(), (22 * dp).toInt(), (6 * dp).toInt()); setOnClickListener { a() }
         }
         val foot = LinearLayout(this).apply {
