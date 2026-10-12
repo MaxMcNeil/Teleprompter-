@@ -15,7 +15,14 @@ import android.text.SpannableString
 import android.text.style.ForegroundColorSpan
 import android.view.*
 import android.widget.*
+import java.io.File
 import java.text.Normalizer
+import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
+import org.vosk.android.SpeechService
+import org.vosk.android.StorageService
+import org.vosk.android.RecognitionListener as VoskListener
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -40,6 +47,10 @@ class OverlayService : Service(), RecognitionListener {
     private val en = ArrayList<Int>()
     private var pos = 0
     private var anchor = 0
+    private var model: Model? = null
+    private var vosk: SpeechService? = null
+    private var muted = false
+    private var modelFailed = false
     private val hl = ForegroundColorSpan(0xFFFFEB3B.toInt())
     private val mAccent = Regex("\\p{M}")
     private val mJunk = Regex("[^\\p{L}\\p{N}]")
@@ -53,8 +64,10 @@ class OverlayService : Service(), RecognitionListener {
 
     override fun onBind(i: Intent?): IBinder? = null
 
-    private fun norm(s: String) =
-        Normalizer.normalize(s, Normalizer.Form.NFD).replace(mAccent, "").lowercase().replace(mJunk, "")
+    // Retire accents / voyelles arabes (tashkeel, hamza), unifie ى/ي et ة/ه, supprime le tatweel
+    private fun norm(s: String): String =
+        Normalizer.normalize(s, Normalizer.Form.NFD).replace(mAccent, "").lowercase()
+            .replace('ى', 'ي').replace('ة', 'ه').replace('ٱ', 'ا').replace("ـ", "").replace(mJunk, "")
 
     override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
         if (i?.action == "STOP") { stopSelf(); return START_NOT_STICKY }
@@ -70,7 +83,7 @@ class OverlayService : Service(), RecognitionListener {
         val p = getSharedPreferences("t", 0)
         val text = p.getString("text", "") ?: ""
         lang = p.getString("lang", "fr-FR") ?: "fr-FR"
-        Regex("\\S+").findAll(text).forEach { words.add(norm(it.value)); st.add(it.range.first); en.add(it.range.last + 1) }
+        Regex("[^\\s'’\\-–—]+").findAll(text).forEach { val w = norm(it.value); if (w.isNotEmpty()) { words.add(w); st.add(it.range.first); en.add(it.range.last + 1) } }
         if (words.isEmpty()) { Toast.makeText(this, "Texte vide", Toast.LENGTH_SHORT).show(); stopSelf(); return START_NOT_STICKY }
 
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -96,7 +109,7 @@ class OverlayService : Service(), RecognitionListener {
         }
         tv = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = size; setLineSpacing(0f, 1.2f)
-            setPadding(24, 24, 24, 500); isClickable = true
+            setPadding(24, 24, 24, 500); isClickable = true; textDirection = View.TEXT_DIRECTION_FIRST_STRONG
             setText(SpannableString(text), TextView.BufferType.SPANNABLE)
         }
         var tx = 0f; var ty = 0f; var tt = 0L
@@ -114,9 +127,19 @@ class OverlayService : Service(), RecognitionListener {
             setPadding((24 * dp).toInt(), 0, (12 * dp).toInt(), 0)
             layoutParams = LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.END }
         }
+        fun arrow(t: String, a: () -> Unit) = TextView(this).apply {
+            text = t; setTextColor(Color.WHITE); textSize = 24f
+            setPadding((22 * dp).toInt(), (6 * dp).toInt(), (22 * dp).toInt(), (6 * dp).toInt()); setOnClickListener { a() }
+        }
+        val foot = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(arrow("▲") { move(-1) }); addView(arrow("▼") { move(1) })
+            addView(View(this@OverlayService).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
+            addView(grip)
+        }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(0xF0600000.toInt())
-            addView(bar); addView(sv); addView(grip)
+            addView(bar); addView(sv); addView(foot)
         }
         lp = WindowManager.LayoutParams(
             (dm.widthPixels * 0.92).toInt(), (dm.heightPixels * 0.4).toInt(),
@@ -143,6 +166,21 @@ class OverlayService : Service(), RecognitionListener {
             }
             true
         }
+        val arDir = File(filesDir, "models/ar").listFiles()?.firstOrNull { it.isDirectory }
+        if (lang.startsWith("fr")) {
+            StorageService.unpack(this, "model-fr", "model",
+                { m -> model = m },
+                { e -> modelFailed = true; Toast.makeText(this, "Modèle vocal indisponible : ${e.message}", Toast.LENGTH_LONG).show() })
+        } else if (lang.startsWith("ar") && File(filesDir, "models/ar.ok").exists() && arDir != null) {
+            Thread {
+                try {
+                    val m = Model(arDir.absolutePath)
+                    h.post { model = m; Toast.makeText(this, "Modèle arabe prêt", Toast.LENGTH_SHORT).show() }
+                } catch (e: Exception) {
+                    h.post { modelFailed = true; Toast.makeText(this, "Modèle arabe indisponible : ${e.message}", Toast.LENGTH_LONG).show() }
+                }
+            }.start()
+        }
         wm.addView(root, lp)
         show()
         return START_NOT_STICKY
@@ -161,24 +199,61 @@ class OverlayService : Service(), RecognitionListener {
 
     private fun muteBeep(on: Boolean) {
         val am = getSystemService(AudioManager::class.java)
+        muted = on
         val d = if (on) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE
         for (st in intArrayOf(AudioManager.STREAM_MUSIC, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM))
             try { am.adjustStreamVolume(st, d, 0) } catch (_: Exception) {}
     }
 
+    private fun move(dir: Int) {
+        if (words.isEmpty() || tv.layout == null) return
+        val y = max(0, sv.scrollY + dir * sv.height * 6 / 10)
+        val off = tv.getOffsetForPosition(24f, (y + sv.height / 3).toFloat())
+        pending = -1
+        pos = max(0, st.indexOfLast { it <= off }); show()
+    }
+
     private fun toggleVoice() {
         voice = !voice
         mic.setTextColor(if (voice) 0xFFFFEB3B.toInt() else Color.WHITE)
-        if (voice) {
-            if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-                Toast.makeText(this, "Reconnaissance vocale indisponible", Toast.LENGTH_LONG).show(); voice = false
-                mic.setTextColor(Color.WHITE); return
+        if (!voice) { sr?.cancel(); stopVosk(); if (muted) muteBeep(false); return }
+        auto = false; play.text = "▶"
+        anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
+        if (model != null) { startVosk(); return }
+        val expect = lang.startsWith("fr") || (lang.startsWith("ar") && File(filesDir, "models/ar.ok").exists())
+        if (expect && !modelFailed) {
+            Toast.makeText(this, "Modèle vocal en chargement… réessayez dans quelques secondes", Toast.LENGTH_LONG).show()
+            voice = false; mic.setTextColor(Color.WHITE); return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "Modèle vocal en chargement… réessayez dans quelques secondes", Toast.LENGTH_LONG).show()
+            voice = false; mic.setTextColor(Color.WHITE); return
+        }
+        muteBeep(true); listen()
+    }
+
+    // Moteur hors ligne : capture le micro avec NOTRE app (priorité accessibilité), sans bip ni coupure
+    private fun startVosk() {
+        try {
+            vosk = SpeechService(Recognizer(model, 16000.0f), 16000.0f).also {
+                it.startListening(object : VoskListener {
+                    override fun onPartialResult(hypothesis: String?) { hypothesis?.let { j -> heardJson(j, "partial") } }
+                    override fun onResult(hypothesis: String?) { hypothesis?.let { j -> heardJson(j, "text") } }
+                    override fun onFinalResult(hypothesis: String?) { hypothesis?.let { j -> heardJson(j, "text") } }
+                    override fun onError(exception: Exception?) {}
+                    override fun onTimeout() {}
+                })
             }
-            auto = false; play.text = "▶"
-            muteBeep(true)
-            anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
-            listen()
-        } else { sr?.cancel(); muteBeep(false) }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Micro indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+            voice = false; mic.setTextColor(Color.WHITE)
+        }
+    }
+
+    private fun stopVosk() { try { vosk?.shutdown() } catch (_: Exception) {}; vosk = null }
+
+    private fun heardJson(j: String, key: String) {
+        try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t) } catch (_: Exception) {}
     }
 
     private fun listen() {
@@ -195,24 +270,34 @@ class OverlayService : Service(), RecognitionListener {
         b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { onHeard(it) }
     }
 
-    // Retrouve la position : compare les 3 derniers mots entendus au texte (saut de mots/phrases OK)
+    private var pending = -1
+    private val splitter = Regex("[\\s'’\\-–—]+")
+
+    // Position : 3 derniers mots entendus comparés au texte (tolère 1 mot mal reconnu près de vous).
+    // Un saut lointain n'est accepté que s'il est confirmé 2 fois de suite.
     private fun onHeard(s: String) {
-        val hw = s.split(" ").map { norm(it) }.filter { it.isNotEmpty() }
+        val hw = s.split(splitter).map { norm(it) }.filter { it.isNotEmpty() }
         val k = min(3, hw.size)
         if (k < 2) return
         val t = hw.takeLast(k); val n = words.size
-        fun find(a: Int, b: Int): Int {
-            var best = -1; var bd = Int.MAX_VALUE
+        if (t.sumOf { it.length } < 8) return
+        fun find(a: Int, b: Int, tol: Int): Int {
+            var best = -1; var bs = Int.MAX_VALUE
             for (i in a..b - k) {
-                var ok = true
-                for (j in 0 until k) if (words[i + j] != t[j]) { ok = false; break }
-                if (ok && abs(i - pos) < bd) { bd = abs(i - pos); best = i + k - 1 }
+                var mm = 0
+                for (j in 0 until k) if (words[i + j] != t[j]) mm++
+                if (mm > tol) continue
+                val sc = mm * 1000 + (if (i < pos) (pos - i) * 3 else i - pos)
+                if (sc < bs) { bs = sc; best = i + k - 1 }
             }
             return best
         }
-        var r = find(max(0, pos - 15), min(n, pos + (if (k == 3) 400 else 60)))
-        if (r < 0 && k == 3) r = find(0, n)
-        if (r >= 0) { pos = r + 1; show() }
+        val near = find(max(0, pos - 15), min(n, pos + 120), if (k == 3) 1 else 0)
+        if (near >= 0) { pending = -1; pos = near + 1; show(); return }
+        if (k < 3) return
+        val far = find(0, n, 0)
+        if (far < 0) return
+        if (pending >= 0 && abs(far - pending) <= 3) { pending = -1; pos = far + 1; show() } else pending = far
     }
 
     override fun onReadyForSpeech(p: Bundle?) {}
@@ -226,7 +311,8 @@ class OverlayService : Service(), RecognitionListener {
     override fun onResults(b: Bundle?) { heard(b); restart() }
 
     override fun onDestroy() {
-        if (voice) muteBeep(false)
+        if (muted) muteBeep(false)
+        stopVosk()
         voice = false; auto = false
         h.removeCallbacksAndMessages(null)
         sr?.destroy()
