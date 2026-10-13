@@ -15,7 +15,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.text.Spannable
 import android.text.SpannableString
-import android.text.style.ForegroundColorSpan
+import android.text.style.BackgroundColorSpan
 import android.view.*
 import android.widget.*
 import java.io.File
@@ -52,7 +52,9 @@ class OverlayService : Service(), RecognitionListener {
     @Volatile private var recOn = false
     private var muted = false
     private var modelFailed = false
-    private val hl = ForegroundColorSpan(0xFFFFEB3B.toInt())
+    private val hl = BackgroundColorSpan(0xFF1E88E5.toInt())
+    private var ai = 1
+    private val alphas = intArrayOf(0x30, 0x50, 0x80, 0xB0, 0xF0)
     private val mAccent = Regex("\\p{M}")
     private val mJunk = Regex("[^\\p{L}\\p{N}]")
     private val scroller = object : Runnable {
@@ -99,7 +101,7 @@ class OverlayService : Service(), RecognitionListener {
         mic = btn("🎤") { toggleVoice() }
         play = btn("▶") { if (voice) toggleVoice(); auto = !auto; play.text = if (auto) "⏸" else "▶"; if (auto) { h.removeCallbacks(scroller); h.post(scroller) } }
         val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; setBackgroundColor(0xFF3A0000.toInt())
+            orientation = LinearLayout.HORIZONTAL; setBackgroundColor(0xAA3A0000.toInt())
             addView(drag)
             addView(btn("A−") { size = max(14f, size - 3); tv.textSize = size })
             addView(btn("A+") { size = min(90f, size + 3); tv.textSize = size })
@@ -109,7 +111,7 @@ class OverlayService : Service(), RecognitionListener {
             addView(btn("✕") { stopSelf() })
         }
         tv = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = size; setLineSpacing(0f, 1.2f)
+            setTextColor(Color.WHITE); textSize = size; setLineSpacing(0f, 1.2f); setShadowLayer(6f, 0f, 0f, Color.BLACK)
             setPadding(24, 24, 24, 500); isClickable = true; textDirection = View.TEXT_DIRECTION_FIRST_STRONG
             setText(SpannableString(text), TextView.BufferType.SPANNABLE)
         }
@@ -135,11 +137,16 @@ class OverlayService : Service(), RecognitionListener {
         val foot = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             addView(arrow("▲") { move(-1) }); addView(arrow("▼") { move(1) })
+            addView(arrow("◐") {
+                ai = (ai + 1) % alphas.size
+                root.setBackgroundColor((alphas[ai] shl 24) or 0x600000)
+                Toast.makeText(this@OverlayService, "Opacité du fond : ${alphas[ai] * 100 / 255} %", Toast.LENGTH_SHORT).show()
+            })
             addView(View(this@OverlayService).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
             addView(grip)
         }
         root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(0xF0600000.toInt())
+            orientation = LinearLayout.VERTICAL; setBackgroundColor((alphas[ai] shl 24) or 0x600000)
             addView(bar); addView(sv); addView(foot)
         }
         lp = WindowManager.LayoutParams(
@@ -187,11 +194,25 @@ class OverlayService : Service(), RecognitionListener {
         return START_NOT_STICKY
     }
 
+    // Début de la phrase qui contient le mot p (15 mots maximum en arrière)
+    private fun sentStart(p: Int): Int {
+        val t = tv.text; var i = p
+        while (i > 0 && p - i < 15) {
+            val c = t[en[i - 1] - 1]
+            val gapEnd = if (i < words.size) st[i] else t.length
+            if (c == '.' || c == '!' || c == '?' || c == '؟' || c == '…' || t.subSequence(en[i - 1], gapEnd).contains('\n')) break
+            i--
+        }
+        return i
+    }
+
     private fun show() {
         val n = words.size
         if (n == 0) return
-        val a = min(pos, n - 1); val b = min(pos + 5, n - 1)
-        (tv.text as Spannable).setSpan(hl, st[a], en[b], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        val a = min(pos, n - 1)
+        val sp = tv.text as Spannable
+        val s0 = sentStart(min(pos, n))
+        if (s0 < pos) sp.setSpan(hl, st[s0], en[min(pos, n) - 1], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE) else sp.removeSpan(hl)
         val l = tv.layout ?: return
         val y = max(0, l.getLineTop(l.getLineForOffset(st[a])) - sv.height / 3)
         anchor = y
