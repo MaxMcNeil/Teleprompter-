@@ -217,7 +217,7 @@ class OverlayService : Service(), RecognitionListener {
     private fun toggleVoice() {
         voice = !voice
         mic.setTextColor(if (voice) 0xFFFFEB3B.toInt() else Color.WHITE)
-        if (!voice) { sr?.cancel(); stopVosk(); if (muted) muteBeep(false); return }
+        if (!voice) { mic.text = "🎤"; sr?.cancel(); stopVosk(); if (muted) muteBeep(false); return }
         auto = false; play.text = "▶"
         anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
         if (model != null) { startVosk(); return }
@@ -233,10 +233,11 @@ class OverlayService : Service(), RecognitionListener {
         muteBeep(true); listen()
     }
 
-    // Moteur hors ligne : capture 48 kHz (comme la caméra) puis réduit à 16 kHz pour Vosk
+    // Moteur hors ligne : capture micro de l'app (priorité accessibilité) et reconnaissance Vosk
     private fun startVosk() {
-        val src = getSharedPreferences("t", 0).getInt("src", MediaRecorder.AudioSource.CAMCORDER)
-        val rate = 48000
+        val src = getSharedPreferences("t", 0).getInt("src2", MediaRecorder.AudioSource.VOICE_RECOGNITION)
+        val rate = if (src == MediaRecorder.AudioSource.VOICE_RECOGNITION) 16000 else 48000
+        val f = rate / 16000
         val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val ar = try { AudioRecord(src, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, rate)) } catch (e: Exception) { null }
         if (ar == null || ar.state != AudioRecord.STATE_INITIALIZED) {
@@ -246,21 +247,40 @@ class OverlayService : Service(), RecognitionListener {
         val rec = Recognizer(model, 16000.0f)
         recOn = true
         Thread {
-            val buf = ShortArray(4800)
+            val buf = ShortArray(1600 * f)
             val out = ByteArray(3200)
+            var quiet = 0; var warned = false
             try {
                 ar.startRecording()
+                if (ar.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    h.post { Toast.makeText(this, "Android refuse le micro à l'app (état ${ar.recordingState})", Toast.LENGTH_LONG).show() }
+                    return@Thread
+                }
                 while (recOn) {
                     val n = ar.read(buf, 0, buf.size)
-                    if (n <= 0) continue
-                    val m = n / 3
+                    if (n < 0) { h.post { Toast.makeText(this, "Erreur micro ($n)", Toast.LENGTH_LONG).show() }; break }
+                    if (n == 0) continue
+                    var peak = 0
+                    val m = n / f
                     for (i in 0 until m) {
-                        val v = (buf[3 * i] + buf[3 * i + 1] + buf[3 * i + 2]) / 3
+                        var sum = 0
+                        for (k in 0 until f) { val x = buf[f * i + k].toInt(); sum += x; if (abs(x) > peak) peak = abs(x) }
+                        val v = sum / f
                         out[2 * i] = (v and 0xff).toByte(); out[2 * i + 1] = (v shr 8).toByte()
                     }
+                    if (peak == 0) quiet++ else quiet = 0
+                    val lvl = min(4, peak / 1500)
+                    val warn = quiet >= 30 && !warned
+                    if (warn) warned = true
                     val fin = rec.acceptWaveForm(out, m * 2)
                     val j = if (fin) rec.result else rec.partialResult
-                    h.post { if (recOn) heardJson(j, if (fin) "text" else "partial") }
+                    h.post {
+                        if (recOn) {
+                            mic.text = "🎤" + "▁▃▅▇█"[lvl]
+                            if (warn) Toast.makeText(this, "Silence total : Android coupe le micro de l'app (la caméra l'occupe). Essayez une autre source micro.", Toast.LENGTH_LONG).show()
+                            heardJson(j, if (fin) "text" else "partial")
+                        }
+                    }
                 }
             } catch (_: Exception) {
             } finally {

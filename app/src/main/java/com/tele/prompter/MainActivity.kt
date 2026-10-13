@@ -34,11 +34,11 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, langs)
             setSelection(langs.indexOf(p.getString("lang", "fr-FR")).coerceAtLeast(0))
         }
-        val srcs = listOf(5, 1, 9)
+        val srcs = listOf(6, 5, 1, 9)
         val sp2 = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
-                listOf("Micro : caméra (CAMCORDER)", "Micro : standard (MIC)", "Micro : non traité (UNPROCESSED)"))
-            setSelection(srcs.indexOf(p.getInt("src", 5)).coerceAtLeast(0))
+                listOf("Micro : reconnaissance vocale (conseillé)", "Micro : caméra (CAMCORDER)", "Micro : standard (MIC)", "Micro : non traité (UNPROCESSED)"))
+            setSelection(srcs.indexOf(p.getInt("src2", 6)).coerceAtLeast(0))
         }
         dl = Button(this).apply { visibility = View.GONE; setOnClickListener { downloadAr() } }
         sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -48,7 +48,7 @@ class MainActivity : Activity() {
         val btn = Button(this).apply {
             text = "▶ Lancer le prompteur"
             setOnClickListener {
-                p.edit().putString("text", et.text.toString()).putString("lang", sp.selectedItem as String).putInt("src", srcs[sp2.selectedItemPosition]).apply()
+                p.edit().putString("text", et.text.toString()).putString("lang", sp.selectedItem as String).putInt("src2", srcs[sp2.selectedItemPosition]).apply()
                 go()
             }
         }
@@ -64,7 +64,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::acc.isInitialized) acc.text = if (a11yOn()) "✅ Micro partagé actif" else "⚠ Activer le micro partagé (Accessibilité)"
+        if (::acc.isInitialized) acc.text = if (!a11yOn()) "⚠ Activer le micro partagé (Accessibilité)" else if (MicShareService.up) "✅ Micro partagé actif" else "⚠ Service activé mais arrêté : désactivez puis réactivez-le"
     }
 
     private fun refreshDl(lang: String) {
