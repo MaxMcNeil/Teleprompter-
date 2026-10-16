@@ -51,6 +51,10 @@ class OverlayService : Service(), RecognitionListener {
     private var model: Model? = null
     @Volatile private var sess = 0
     private var errs = 0
+    private var uttBase = -1
+    private var lastProg = 0L
+    private var pace = 0f
+    private var acc = 0f
     companion object {
         @Volatile var frModel: Model? = null
         @Volatile var arModel: Model? = null
@@ -66,7 +70,12 @@ class OverlayService : Service(), RecognitionListener {
         override fun run() {
             if (auto && !sv.canScrollVertically(1)) { auto = false; play.text = "▶" }
             if (auto) sv.scrollBy(0, speed)
-            else if (voice && speed > 0 && sv.scrollY < anchor + sv.height / 5) sv.scrollBy(0, speed)
+            else if (voice && speed > 0 && pace > 0f && SystemClock.uptimeMillis() - lastProg < 1200 && sv.scrollY < anchor + sv.height / 5) {
+                val ph = tv.layout?.height?.toFloat() ?: 0f
+                acc += pace * (ph / max(1, words.size)) * (speed / 2f) * 0.8f * 0.04f
+                val d = acc.toInt()
+                if (d > 0) { sv.scrollBy(0, d); acc -= d }
+            }
             if (auto || voice) h.postDelayed(this, 40)
         }
     }
@@ -130,7 +139,7 @@ class OverlayService : Service(), RecognitionListener {
             if (e.action == MotionEvent.ACTION_DOWN) { tx = e.x; ty = e.y; tt = e.eventTime }
             else if (e.action == MotionEvent.ACTION_UP && abs(e.x - tx) < 20 && abs(e.y - ty) < 20 && e.eventTime - tt < 300) {
                 val off = tv.getOffsetForPosition(e.x, e.y)
-                pos = max(0, st.indexOfLast { it <= off }); show()
+                pos = max(0, st.indexOfLast { it <= off }); uttBase = -1; show()
             }
             false
         }
@@ -245,8 +254,10 @@ class OverlayService : Service(), RecognitionListener {
         if (n == 0) return
         val a = min(pos, n - 1)
         val sp = tv.text as Spannable
-        val s0 = sentStart(min(pos, n))
-        if (s0 < pos) sp.setSpan(hl, st[s0], en[min(pos, n) - 1], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE) else sp.removeSpan(hl)
+        if (pos <= 0) sp.removeSpan(hl) else {
+            val last = min(pos, n) - 1
+            sp.setSpan(hl, st[sentStart(last)], en[last], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
         val l = tv.layout ?: return
         val y = max(0, l.getLineTop(l.getLineForOffset(st[a])) - sv.height / 3)
         anchor = y
@@ -266,7 +277,7 @@ class OverlayService : Service(), RecognitionListener {
         if (words.isEmpty() || tv.layout == null) return
         val y = max(0, sv.scrollY + dir * sv.height * 6 / 10)
         val off = tv.getOffsetForPosition(24f, (y + sv.height / 3).toFloat())
-        pending = -1
+        pending = -1; uttBase = -1
         pos = max(0, st.indexOfLast { it <= off }); show()
     }
 
@@ -275,6 +286,7 @@ class OverlayService : Service(), RecognitionListener {
         mic.setTextColor(if (voice) 0xFFFFEB3B.toInt() else Color.WHITE)
         if (!voice) { mic.text = "🎤"; sr?.cancel(); stopVosk(); if (muted) muteBeep(false); return }
         auto = false; play.text = "▶"
+        pace = 0f; lastProg = 0L; uttBase = -1; acc = 0f
         anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
         if (model != null) { startVosk(); return }
         val expect = lang.startsWith("fr") || (lang.startsWith("ar") && File(filesDir, "models/ar.ok").exists())
@@ -359,7 +371,7 @@ class OverlayService : Service(), RecognitionListener {
     private fun stopVosk() { sess++ }
 
     private fun heardJson(j: String, key: String) {
-        try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t) } catch (_: Exception) {}
+        try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t, key == "text") else if (key == "text") uttBase = -1 } catch (_: Exception) {}
     }
 
     private fun listen() {
@@ -372,39 +384,50 @@ class OverlayService : Service(), RecognitionListener {
 
     private fun restart() { if (voice) h.postDelayed({ if (voice) listen() }, min(3000L, 150L + errs * 300L)) }
 
-    private fun heard(b: Bundle?) {
+    private fun heard(b: Bundle?, fin: Boolean) {
         errs = 0
-        b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { onHeard(it) }
+        b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { onHeard(it, fin) }
     }
 
     private var pending = -1
     private val splitter = Regex("[\\s'’\\-–—]+")
 
-    // Position : 3 derniers mots entendus comparés au texte (tolère 1 mot mal reconnu près de vous).
-    // Un saut lointain n'est accepté que s'il est confirmé 2 fois de suite.
-    private fun onHeard(s: String) {
+    // Suivi : chaque mot entendu est cherché juste après la position actuelle (1 à 3 mots sautés si le mot
+    // est assez long) ; un saut plus loin (jusqu'à ~2 phrases) exige 2 mots consécutifs. Jamais de recherche
+    // au début/à la fin du texte, jamais de retour en arrière : ce qui est hors texte est ignoré.
+    private fun onHeard(s: String, fin: Boolean) {
         val hw = s.split(splitter).map { norm(it) }.filter { it.isNotEmpty() }
-        val k = min(3, hw.size)
-        if (k < 2) return
-        val t = hw.takeLast(k); val n = words.size
-        if (t.sumOf { it.length } < 8) return
-        fun find(a: Int, b: Int, tol: Int): Int {
-            var best = -1; var bs = Int.MAX_VALUE
-            for (i in a..b - k) {
-                var mm = 0
-                for (j in 0 until k) if (words[i + j] != t[j]) mm++
-                if (mm > tol) continue
-                val sc = mm * 1000 + (if (i < pos) (pos - i) * 3 else i - pos)
-                if (sc < bs) { bs = sc; best = i + k - 1 }
+        if (hw.isEmpty()) { if (fin) uttBase = -1; return }
+        if (uttBase < 0) uttBase = pos
+        val n = words.size
+        var p = uttBase
+        for (i in hw.indices) {
+            val w = hw[i]
+            var j = -1
+            for (d in 0..3) {
+                val q = p + d
+                if (q >= n) break
+                if (words[q] == w && (d == 0 || w.length >= 4)) { j = q; break }
             }
-            return best
+            if (j < 0 && i + 1 < hw.size && w.length + hw[i + 1].length >= 8) {
+                var q = p + 1
+                while (q < min(n - 1, p + 80)) {
+                    if (words[q] == w && words[q + 1] == hw[i + 1]) { j = q; break }
+                    q++
+                }
+            }
+            if (j >= 0) p = j + 1
         }
-        val near = find(max(0, pos - 15), min(n, pos + 120), if (k == 3) 1 else 0)
-        if (near >= 0) { pending = -1; pos = near + 1; show(); return }
-        if (k < 3) return
-        val far = find(0, n, 0)
-        if (far < 0) return
-        if (pending >= 0 && abs(far - pending) <= 3) { pending = -1; pos = far + 1; show() } else pending = far
+        if (p > pos) {
+            val now = SystemClock.uptimeMillis()
+            val dt = max(150L, now - lastProg)
+            if (lastProg > 0 && dt < 2500 && p - pos <= 8) {
+                val inst = (p - pos) * 1000f / dt
+                pace = (if (pace == 0f) inst else 0.6f * pace + 0.4f * inst).coerceIn(0.5f, 5f)
+            }
+            lastProg = now; pos = p; show()
+        }
+        if (fin) uttBase = -1
     }
 
     override fun onReadyForSpeech(p: Bundle?) {}
@@ -420,8 +443,8 @@ class OverlayService : Service(), RecognitionListener {
         }
         errs++; restart()
     }
-    override fun onPartialResults(b: Bundle?) = heard(b)
-    override fun onResults(b: Bundle?) { heard(b); restart() }
+    override fun onPartialResults(b: Bundle?) = heard(b, false)
+    override fun onResults(b: Bundle?) { heard(b, true); restart() }
 
     override fun onDestroy() {
         if (muted) muteBeep(false)
