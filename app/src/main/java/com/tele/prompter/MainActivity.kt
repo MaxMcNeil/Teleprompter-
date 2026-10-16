@@ -3,6 +3,8 @@ package com.tele.prompter
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -23,6 +25,12 @@ class MainActivity : Activity() {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         val p = getSharedPreferences("t", 0)
+        if (p.getBoolean("muted", false)) {
+            p.edit().putBoolean("muted", false).apply()
+            val am = getSystemService(AudioManager::class.java)
+            for (st in intArrayOf(AudioManager.STREAM_MUSIC, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM))
+                try { am.adjustStreamVolume(st, AudioManager.ADJUST_UNMUTE, 0) } catch (_: Exception) {}
+        }
         if (intent.action == "com.tele.START") { go(); finish(); return }
         requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
         val et = EditText(this).apply {
@@ -80,13 +88,14 @@ class MainActivity : Activity() {
                 File(filesDir, "models/ar.ok").delete()
                 val dir = File(filesDir, "models/ar").apply { deleteRecursively(); mkdirs() }
                 val c = URL(arUrl).openConnection() as HttpURLConnection
+                c.connectTimeout = 15000; c.readTimeout = 30000
                 var done = 0L; var shown = 0L
                 val buf = ByteArray(65536)
                 ZipInputStream(c.inputStream.buffered()).use { z ->
                     var e = z.nextEntry
                     while (e != null) {
                         val f = File(dir, e.name)
-                        if (!f.canonicalPath.startsWith(dir.canonicalPath)) throw SecurityException("zip")
+                        if (!f.canonicalPath.startsWith(dir.canonicalPath + File.separator)) throw SecurityException("zip")
                         if (e.isDirectory) f.mkdirs() else {
                             f.parentFile?.mkdirs()
                             f.outputStream().use { o ->
@@ -110,6 +119,11 @@ class MainActivity : Activity() {
     }
 
     private fun go() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Autorisez le micro, puis relancez", Toast.LENGTH_LONG).show()
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+            return
+        }
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Autorisez « Afficher par-dessus les autres applis »", Toast.LENGTH_LONG).show()
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))

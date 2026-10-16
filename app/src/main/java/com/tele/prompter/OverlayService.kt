@@ -49,7 +49,12 @@ class OverlayService : Service(), RecognitionListener {
     private var pos = 0
     private var anchor = 0
     private var model: Model? = null
-    @Volatile private var recOn = false
+    @Volatile private var sess = 0
+    private var errs = 0
+    companion object {
+        @Volatile var frModel: Model? = null
+        @Volatile var arModel: Model? = null
+    }
     private var muted = false
     private var modelFailed = false
     private val hl = BackgroundColorSpan(0xFF1E88E5.toInt())
@@ -59,6 +64,7 @@ class OverlayService : Service(), RecognitionListener {
     private val mJunk = Regex("[^\\p{L}\\p{N}]")
     private val scroller = object : Runnable {
         override fun run() {
+            if (auto && !sv.canScrollVertically(1)) { auto = false; play.text = "▶" }
             if (auto) sv.scrollBy(0, speed)
             else if (voice && speed > 0 && sv.scrollY < anchor + sv.height / 5) sv.scrollBy(0, speed)
             if (auto || voice) h.postDelayed(this, 40)
@@ -80,11 +86,15 @@ class OverlayService : Service(), RecognitionListener {
         @Suppress("DEPRECATION")
         val n = Notification.Builder(this, "t").setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("Prompteur actif").addAction(0, "Fermer", stop).build()
-        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        if (::root.isInitialized) return START_NOT_STICKY
+        try { startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE) } catch (e: Exception) {
+            Toast.makeText(this, "Autorisez le micro à l'app puis relancez (${e.javaClass.simpleName})", Toast.LENGTH_LONG).show()
+            stopSelf(); return START_NOT_STICKY
+        }
+        if (::root.isInitialized) teardown()
 
         val p = getSharedPreferences("t", 0)
-        val text = p.getString("text", "") ?: ""
+        if (p.getBoolean("muted", false)) muteBeep(false)
+        val text = (p.getString("text", "") ?: "").take(500_000)
         lang = p.getString("lang", "fr-FR") ?: "fr-FR"
         Regex("[^\\s'’\\-–—]+").findAll(text).forEach { val w = norm(it.value); if (w.isNotEmpty()) { words.add(w); st.add(it.range.first); en.add(it.range.last + 1) } }
         if (words.isEmpty()) { Toast.makeText(this, "Texte vide", Toast.LENGTH_SHORT).show(); stopSelf(); return START_NOT_STICKY }
@@ -103,8 +113,8 @@ class OverlayService : Service(), RecognitionListener {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; setBackgroundColor(0xAA3A0000.toInt())
             addView(drag)
-            addView(btn("A−") { size = max(14f, size - 3); tv.textSize = size })
-            addView(btn("A+") { size = min(90f, size + 3); tv.textSize = size })
+            addView(btn("A−") { size = max(14f, size - 3); tv.textSize = size; tv.post { show() } })
+            addView(btn("A+") { size = min(90f, size + 3); tv.textSize = size; tv.post { show() } })
             addView(mic); addView(play)
             addView(btn("🐢") { speed = max(0, speed - 1); Toast.makeText(this@OverlayService, "Vitesse : $speed", Toast.LENGTH_SHORT).show() })
             addView(btn("🐇") { speed = min(12, speed + 1); Toast.makeText(this@OverlayService, "Vitesse : $speed", Toast.LENGTH_SHORT).show() })
@@ -160,7 +170,12 @@ class OverlayService : Service(), RecognitionListener {
         drag.setOnTouchListener { _, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; a = lp.x; b = lp.y }
-                MotionEvent.ACTION_MOVE -> { lp.x = a + (e.rawX - dx).toInt(); lp.y = b + (e.rawY - dy).toInt(); wm.updateViewLayout(root, lp) }
+                MotionEvent.ACTION_MOVE -> {
+                    val d = resources.displayMetrics
+                    lp.x = (a + (e.rawX - dx).toInt()).coerceIn(-lp.width + 120, d.widthPixels - 120)
+                    lp.y = (b + (e.rawY - dy).toInt()).coerceIn(0, d.heightPixels - 120)
+                    wm.updateViewLayout(root, lp)
+                }
             }
             true
         }
@@ -168,30 +183,49 @@ class OverlayService : Service(), RecognitionListener {
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; a = lp.width; b = lp.height }
                 MotionEvent.ACTION_MOVE -> {
-                    lp.width = max(350, a + (e.rawX - dx).toInt()); lp.height = max(350, b + (e.rawY - dy).toInt())
+                    val d = resources.displayMetrics
+                    lp.width = (a + (e.rawX - dx).toInt()).coerceIn(350, d.widthPixels)
+                    lp.height = (b + (e.rawY - dy).toInt()).coerceIn(350, d.heightPixels)
                     wm.updateViewLayout(root, lp)
                 }
+                MotionEvent.ACTION_UP -> show()
             }
             true
         }
+        model = null; modelFailed = false
         val arDir = File(filesDir, "models/ar").listFiles()?.firstOrNull { it.isDirectory }
         if (lang.startsWith("fr")) {
-            StorageService.unpack(this, "model-fr", "model",
-                { m -> model = m },
+            model = frModel
+            if (model == null) StorageService.unpack(this, "model-fr", "model",
+                { m -> frModel = m; if (lang.startsWith("fr")) model = m },
                 { e -> modelFailed = true; Toast.makeText(this, "Modèle vocal indisponible : ${e.message}", Toast.LENGTH_LONG).show() })
         } else if (lang.startsWith("ar") && File(filesDir, "models/ar.ok").exists() && arDir != null) {
-            Thread {
+            model = arModel
+            if (model == null) Thread {
                 try {
                     val m = Model(arDir.absolutePath)
-                    h.post { model = m; Toast.makeText(this, "Modèle arabe prêt", Toast.LENGTH_SHORT).show() }
-                } catch (e: Exception) {
+                    arModel = m
+                    h.post { if (lang.startsWith("ar")) model = m; Toast.makeText(this, "Modèle arabe prêt", Toast.LENGTH_SHORT).show() }
+                } catch (e: Throwable) {
                     h.post { modelFailed = true; Toast.makeText(this, "Modèle arabe indisponible : ${e.message}", Toast.LENGTH_LONG).show() }
                 }
             }.start()
         }
-        wm.addView(root, lp)
+        try { wm.addView(root, lp) } catch (e: Exception) {
+            Toast.makeText(this, "Fenêtre impossible : autorisez « Afficher par-dessus les autres applis »", Toast.LENGTH_LONG).show()
+            stopSelf(); return START_NOT_STICKY
+        }
         show()
         return START_NOT_STICKY
+    }
+
+    private fun teardown() {
+        stopVosk(); try { sr?.cancel() } catch (_: Exception) {}
+        if (muted) muteBeep(false)
+        voice = false; auto = false
+        h.removeCallbacksAndMessages(null)
+        try { wm.removeView(root) } catch (_: Exception) {}
+        words.clear(); st.clear(); en.clear(); pos = 0; pending = -1; anchor = 0
     }
 
     // Début de la phrase qui contient le mot p (15 mots maximum en arrière)
@@ -222,6 +256,7 @@ class OverlayService : Service(), RecognitionListener {
     private fun muteBeep(on: Boolean) {
         val am = getSystemService(AudioManager::class.java)
         muted = on
+        getSharedPreferences("t", 0).edit().putBoolean("muted", on).apply()
         val d = if (on) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE
         for (st in intArrayOf(AudioManager.STREAM_MUSIC, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM))
             try { am.adjustStreamVolume(st, d, 0) } catch (_: Exception) {}
@@ -256,6 +291,7 @@ class OverlayService : Service(), RecognitionListener {
 
     // Moteur hors ligne : capture micro de l'app (priorité accessibilité) et reconnaissance Vosk
     private fun startVosk() {
+        val my = ++sess
         val src = getSharedPreferences("t", 0).getInt("src2", MediaRecorder.AudioSource.VOICE_RECOGNITION)
         val rate = if (src == MediaRecorder.AudioSource.VOICE_RECOGNITION) 16000 else 48000
         val f = rate / 16000
@@ -265,8 +301,16 @@ class OverlayService : Service(), RecognitionListener {
             Toast.makeText(this, "Micro indisponible (essayez une autre source micro)", Toast.LENGTH_LONG).show()
             ar?.release(); voice = false; mic.setTextColor(Color.WHITE); return
         }
-        val rec = Recognizer(model, 16000.0f)
-        recOn = true
+        val rec = try { Recognizer(model, 16000.0f) } catch (e: Throwable) {
+            ar.release(); Toast.makeText(this, "Reconnaissance indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+            voice = false; mic.setTextColor(Color.WHITE); return
+        }
+        fun fail(msg: String) = h.post {
+            if (sess == my) {
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                voice = false; mic.setTextColor(Color.WHITE); mic.text = "🎤"
+            }
+        }
         Thread {
             val buf = ShortArray(1600 * f)
             val out = ByteArray(3200)
@@ -274,12 +318,12 @@ class OverlayService : Service(), RecognitionListener {
             try {
                 ar.startRecording()
                 if (ar.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                    h.post { Toast.makeText(this, "Android refuse le micro à l'app (état ${ar.recordingState})", Toast.LENGTH_LONG).show() }
+                    fail("Android refuse le micro à l'app (état ${ar.recordingState})")
                     return@Thread
                 }
-                while (recOn) {
+                while (sess == my) {
                     val n = ar.read(buf, 0, buf.size)
-                    if (n < 0) { h.post { Toast.makeText(this, "Erreur micro ($n)", Toast.LENGTH_LONG).show() }; break }
+                    if (n < 0) { fail("Erreur micro ($n)"); break }
                     if (n == 0) continue
                     var peak = 0
                     val m = n / f
@@ -296,14 +340,15 @@ class OverlayService : Service(), RecognitionListener {
                     val fin = rec.acceptWaveForm(out, m * 2)
                     val j = if (fin) rec.result else rec.partialResult
                     h.post {
-                        if (recOn) {
+                        if (sess == my) {
                             mic.text = "🎤" + "▁▃▅▇█"[lvl]
                             if (warn) Toast.makeText(this, "Silence total : Android coupe le micro de l'app (la caméra l'occupe). Essayez une autre source micro.", Toast.LENGTH_LONG).show()
                             heardJson(j, if (fin) "text" else "partial")
                         }
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Throwable) {
+                fail("Erreur micro : ${e.message}")
             } finally {
                 try { ar.stop() } catch (_: Exception) {}
                 ar.release(); rec.close()
@@ -311,7 +356,7 @@ class OverlayService : Service(), RecognitionListener {
         }.start()
     }
 
-    private fun stopVosk() { recOn = false }
+    private fun stopVosk() { sess++ }
 
     private fun heardJson(j: String, key: String) {
         try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t) } catch (_: Exception) {}
@@ -325,9 +370,10 @@ class OverlayService : Service(), RecognitionListener {
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang))
     }
 
-    private fun restart() { if (voice) h.postDelayed({ if (voice) listen() }, 150) }
+    private fun restart() { if (voice) h.postDelayed({ if (voice) listen() }, min(3000L, 150L + errs * 300L)) }
 
     private fun heard(b: Bundle?) {
+        errs = 0
         b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { onHeard(it) }
     }
 
@@ -367,7 +413,13 @@ class OverlayService : Service(), RecognitionListener {
     override fun onBufferReceived(b: ByteArray?) {}
     override fun onEndOfSpeech() {}
     override fun onEvent(t: Int, b: Bundle?) {}
-    override fun onError(e: Int) = restart()
+    override fun onError(e: Int) {
+        if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+            Toast.makeText(this, "Micro refusé : autorisez-le dans les réglages de l'app", Toast.LENGTH_LONG).show()
+            voice = false; mic.setTextColor(Color.WHITE); if (muted) muteBeep(false); return
+        }
+        errs++; restart()
+    }
     override fun onPartialResults(b: Bundle?) = heard(b)
     override fun onResults(b: Bundle?) { heard(b); restart() }
 
@@ -376,8 +428,8 @@ class OverlayService : Service(), RecognitionListener {
         stopVosk()
         voice = false; auto = false
         h.removeCallbacksAndMessages(null)
-        sr?.destroy()
-        if (::root.isInitialized) wm.removeView(root)
+        try { sr?.destroy() } catch (_: Exception) {}
+        if (::root.isInitialized) try { wm.removeView(root) } catch (_: Exception) {}
         super.onDestroy()
     }
 }
