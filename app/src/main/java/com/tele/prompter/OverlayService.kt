@@ -56,8 +56,16 @@ class OverlayService : Service(), RecognitionListener {
     private var lastProg = 0L
     private var pace = 0f
     private var acc = 0f
-    private var scrW = 0
-    private var scrH = 0
+    private lateinit var holder: FrameLayout
+    private var orient: OrientationEventListener? = null
+    @Volatile private var phys = -1
+    private var rot = 0
+    private var rw0 = 0
+    private var rh0 = 0
+    private var lw = 0
+    private var lh = 0
+    private var rx = 0
+    private var ry = 0
     companion object {
         @Volatile var frModel: Model? = null
         @Volatile var arModel: Model? = null
@@ -172,33 +180,38 @@ class OverlayService : Service(), RecognitionListener {
             addView(bar); addView(sv); addView(foot)
         }
         lp = WindowManager.LayoutParams(
-            (dm.widthPixels * 0.92).toInt(), (dm.heightPixels * 0.4).toInt(),
+            100, 100,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = (dm.widthPixels * 0.04).toInt(); y = (dm.heightPixels * 0.1).toInt() }
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+        holder = FrameLayout(this).apply { clipChildren = true; addView(root) }
+        rw0 = 0; rh0 = 0; rot = 0
+        val (sw, sh) = screen()
+        rw0 = sw; rh0 = sh
+        lw = (sw * 0.92).toInt(); lh = (sh * 0.4).toInt(); rx = (sw * 0.04).toInt(); ry = (sh * 0.1).toInt()
 
         var dx = 0f; var dy = 0f; var a = 0; var b = 0
         drag.setOnTouchListener { _, e ->
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; a = lp.x; b = lp.y }
+                MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; a = rx; b = ry }
                 MotionEvent.ACTION_MOVE -> {
-                    val d = resources.displayMetrics
-                    lp.x = (a + (e.rawX - dx).toInt()).coerceIn(-lp.width + 120, d.widthPixels - 120)
-                    lp.y = (b + (e.rawY - dy).toInt()).coerceIn(0, d.heightPixels - 120)
-                    wm.updateViewLayout(root, lp)
+                    val (ddx, ddy) = toReader(e.rawX - dx, e.rawY - dy)
+                    rx = (a + ddx).coerceIn(-lw + 120, rw0 - 120)
+                    ry = (b + ddy).coerceIn(0, max(0, rh0 - 120))
+                    place()
                 }
             }
             true
         }
         grip.setOnTouchListener { _, e ->
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; a = lp.width; b = lp.height }
+                MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; a = lw; b = lh }
                 MotionEvent.ACTION_MOVE -> {
-                    val d = resources.displayMetrics
-                    lp.width = (a + (e.rawX - dx).toInt()).coerceIn(350, d.widthPixels)
-                    lp.height = (b + (e.rawY - dy).toInt()).coerceIn(350, d.heightPixels)
-                    wm.updateViewLayout(root, lp)
+                    val (ddx, ddy) = toReader(e.rawX - dx, e.rawY - dy)
+                    lw = (a + ddx).coerceIn(min(350, rw0), rw0)
+                    lh = (b + ddy).coerceIn(min(350, rh0), rh0)
+                    place()
                 }
                 MotionEvent.ACTION_UP -> show()
             }
@@ -223,11 +236,20 @@ class OverlayService : Service(), RecognitionListener {
                 }
             }.start()
         }
-        screen().let { scrW = it.first; scrH = it.second }
-        try { wm.addView(root, lp) } catch (e: Exception) {
+        place(false)
+        try { wm.addView(holder, lp) } catch (e: Exception) {
             Toast.makeText(this, "Fenêtre impossible : autorisez « Afficher par-dessus les autres applis »", Toast.LENGTH_LONG).show()
             stopSelf(); return START_NOT_STICKY
         }
+        try { orient?.disable() } catch (_: Exception) {}
+        orient = object : OrientationEventListener(this) {
+            override fun onOrientationChanged(o: Int) {
+                if (o == ORIENTATION_UNKNOWN) return
+                val q = when { o <= 30 || o >= 330 -> 0; o in 60..120 -> 90; o in 240..300 -> 270; else -> return }
+                if (q != phys) { phys = q; h.post { update() } }
+            }
+        }.also { if (it.canDetectOrientation()) it.enable() }
+        h.post { update() }
         show()
         return START_NOT_STICKY
     }
@@ -241,27 +263,47 @@ class OverlayService : Service(), RecognitionListener {
         return Pair(w, hh)
     }
 
-    // Rotation du téléphone : la fenêtre garde ses proportions et suit l'écran
+    // Rotation : l'écran peut rester vertical (caméra, YouTube…) alors que le téléphone est couché.
+    // On lit le capteur et on fait pivoter le texte nous-mêmes, quelle que soit l'appli en dessous.
     override fun onConfigurationChanged(c: Configuration) {
         super.onConfigurationChanged(c)
-        if (!::root.isInitialized || root.parent == null) return
-        h.post { relayout() }
+        h.post { update() }
     }
 
-    private fun relayout() {
-        if (!::root.isInitialized || root.parent == null) return
+    private fun dispDeg(): Int = try {
+        (getSystemService(android.hardware.display.DisplayManager::class.java)
+            .getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: 0) * 90
+    } catch (_: Exception) { 0 }
+
+    // Taille de l'écran vue par le lecteur (dans le sens où il tient le téléphone)
+    private fun readerSize(r: Int): Pair<Int, Int> {
         val (w, hh) = screen()
-        if (w == scrW && hh == scrH) return
+        return if (r % 180 == 0) Pair(w, hh) else Pair(hh, w)
+    }
+
+    // Déplacement du doigt (écran) converti dans le sens du lecteur
+    private fun toReader(x: Float, y: Float): Pair<Int, Int> = when (rot) {
+        90 -> Pair(y.toInt(), (-x).toInt())
+        270 -> Pair((-y).toInt(), x.toInt())
+        else -> Pair(x.toInt(), y.toInt())
+    }
+
+    private fun update() {
+        if (!::holder.isInitialized || holder.parent == null) return
+        var r = if (phys < 0) 0 else (720 - phys - dispDeg()) % 360
+        if (r == 180) r = 0
+        val (nw, nh) = readerSize(r)
+        if (r == rot && nw == rw0 && nh == rh0) return
         val l0 = tv.layout
         val topOff = if (l0 != null) l0.getLineStart(l0.getLineForVertical(sv.scrollY)) else 0
-        if (scrW > 0 && scrH > 0) {
-            lp.width = (lp.width.toLong() * w / scrW).toInt().coerceIn(min(350, w), w)
-            lp.height = (lp.height.toLong() * hh / scrH).toInt().coerceIn(min(350, hh), hh)
-            lp.x = (lp.x.toLong() * w / scrW).toInt().coerceIn(-lp.width + 120, w - 120)
-            lp.y = (lp.y.toLong() * hh / scrH).toInt().coerceIn(0, max(0, hh - 120))
+        if (rw0 > 0 && rh0 > 0) {
+            lw = (lw.toLong() * nw / rw0).toInt().coerceIn(min(350, nw), nw)
+            lh = (lh.toLong() * nh / rh0).toInt().coerceIn(min(350, nh), nh)
+            rx = (rx.toLong() * nw / rw0).toInt().coerceIn(-lw + 120, nw - 120)
+            ry = (ry.toLong() * nh / rh0).toInt().coerceIn(0, max(0, nh - 120))
         }
-        scrW = w; scrH = hh
-        try { wm.updateViewLayout(root, lp) } catch (_: Exception) { return }
+        rot = r; rw0 = nw; rh0 = nh
+        place()
         h.postDelayed({
             val l = tv.layout ?: return@postDelayed
             sv.scrollTo(0, l.getLineTop(l.getLineForOffset(min(topOff, tv.text.length))))
@@ -270,12 +312,26 @@ class OverlayService : Service(), RecognitionListener {
         }, 250)
     }
 
+    // Place la fenêtre à l'écran à partir de la position/taille côté lecteur, et pivote le contenu
+    private fun place(apply: Boolean = true) {
+        val (w, hh) = screen()
+        when (rot) {
+            90 -> { lp.width = lh; lp.height = lw; lp.x = w - ry - lh; lp.y = rx }
+            270 -> { lp.width = lh; lp.height = lw; lp.x = ry; lp.y = hh - rx - lw }
+            else -> { lp.width = lw; lp.height = lh; lp.x = rx; lp.y = ry }
+        }
+        root.layoutParams = FrameLayout.LayoutParams(lw, lh, Gravity.CENTER)
+        root.rotation = rot.toFloat()
+        if (apply) try { wm.updateViewLayout(holder, lp) } catch (_: Exception) {}
+    }
+
     private fun teardown() {
         stopVosk(); try { sr?.cancel() } catch (_: Exception) {}
         if (muted) muteBeep(false)
         voice = false; auto = false
         h.removeCallbacksAndMessages(null)
-        try { wm.removeView(root) } catch (_: Exception) {}
+        try { orient?.disable() } catch (_: Exception) {}
+        try { wm.removeView(holder) } catch (_: Exception) {}
         words.clear(); st.clear(); en.clear(); pos = 0; pending = -1; anchor = 0
     }
 
@@ -494,7 +550,8 @@ class OverlayService : Service(), RecognitionListener {
         voice = false; auto = false
         h.removeCallbacksAndMessages(null)
         try { sr?.destroy() } catch (_: Exception) {}
-        if (::root.isInitialized) try { wm.removeView(root) } catch (_: Exception) {}
+        try { orient?.disable() } catch (_: Exception) {}
+        if (::holder.isInitialized) try { wm.removeView(holder) } catch (_: Exception) {}
         super.onDestroy()
     }
 }
