@@ -6,11 +6,11 @@ android {
     namespace = "com.tele.prompter"
     compileSdk = 34
     defaultConfig {
-        applicationId = "com.tele.prompter"
+        applicationId = "com.tele.prompteur"
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
     // Clé fixe : chaque nouvel APK s'installe par-dessus l'ancien (sinon « paquet non valide »)
     signingConfigs {
