@@ -18,6 +18,7 @@ import android.widget.*
 
 class MainActivity : Activity() {
     private lateinit var acc: Button
+    private lateinit var et: EditText
     private lateinit var dl: Button
     private val arUrl = "https://alphacephei.com/vosk/models/vosk-model-ar-mgb2-0.4.zip"
     private val langs = listOf("fr-FR", "ar-SA", "en-US", "es-ES")
@@ -33,7 +34,7 @@ class MainActivity : Activity() {
         }
         if (intent.action == "com.tele.START") { go(); finish(); return }
         requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
-        val et = EditText(this).apply {
+        et = EditText(this).apply {
             setText(p.getString("text", "")); hint = "Collez votre texte ici"
             gravity = Gravity.TOP
             layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
@@ -60,11 +61,17 @@ class MainActivity : Activity() {
                 go()
             }
         }
+        val imp = Button(this).apply {
+            text = "📂 Importer un fichier (txt, docx, odt, md)"
+            setOnClickListener {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), 42)
+            }
+        }
         acc = Button(this).apply { setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } }
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(32, 32, 32, 32); fitsSystemWindows = true
             addView(TextView(context).apply { text = "Langue de la voix :" })
-            addView(sp); addView(sp2); addView(dl); addView(et); addView(acc); addView(btn)
+            addView(sp); addView(sp2); addView(dl); addView(imp); addView(et); addView(acc); addView(btn)
         })
     }
 
@@ -73,6 +80,65 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::acc.isInitialized) acc.text = if (!a11yOn()) "⚠ Activer le micro partagé (Accessibilité)" else if (MicShareService.up) "✅ Micro partagé actif" else "⚠ Service activé mais arrêté : désactivez puis réactivez-le"
+    }
+
+    override fun onActivityResult(rc: Int, res: Int, data: Intent?) {
+        super.onActivityResult(rc, res, data)
+        if (rc != 42 || res != RESULT_OK) return
+        val uri = data?.data ?: return
+        Thread {
+            try {
+                val t = readDoc(uri)
+                runOnUiThread {
+                    if (t.isBlank()) Toast.makeText(this, "Fichier vide ou illisible", Toast.LENGTH_LONG).show()
+                    else {
+                        et.setText(t)
+                        getSharedPreferences("t", 0).edit().putString("text", t).apply()
+                        val warn = if (t.length > 500_000) " (seuls les 500 000 premiers seront lus)" else ""
+                        Toast.makeText(this, "Importé : ${t.length} caractères$warn", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Throwable) {
+                runOnUiThread { Toast.makeText(this, "Import impossible : ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }.start()
+    }
+
+    private fun readDoc(uri: Uri): String {
+        val b = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw Exception("lecture impossible")
+        if (b.size > 30_000_000) throw Exception("fichier trop gros")
+        if (b.size >= 4 && String(b, 0, 4, Charsets.ISO_8859_1) == "%PDF")
+            throw Exception("PDF non pris en charge : enregistrez-le en .txt ou .docx")
+        if (b.size >= 4 && b[0] == 0x50.toByte() && b[1] == 0x4B.toByte()) {
+            ZipInputStream(b.inputStream()).use { z ->
+                var e = z.nextEntry
+                while (e != null) {
+                    if (e.name == "word/document.xml" || e.name == "content.xml") return xmlToText(String(z.readBytes(), Charsets.UTF_8))
+                    e = z.nextEntry
+                }
+            }
+            throw Exception("format non reconnu (utilisez .txt, .docx ou .odt)")
+        }
+        val s = when {
+            b.size >= 2 && b[0] == 0xFF.toByte() && b[1] == 0xFE.toByte() -> String(b, 2, b.size - 2, Charsets.UTF_16LE)
+            b.size >= 2 && b[0] == 0xFE.toByte() && b[1] == 0xFF.toByte() -> String(b, 2, b.size - 2, Charsets.UTF_16BE)
+            else -> {
+                val u = String(b, Charsets.UTF_8).removePrefix("\uFEFF")
+                if (u.count { it == '\uFFFD' } > u.length / 100) String(b, charset("windows-1252")) else u
+            }
+        }
+        return s.replace("\r\n", "\n").replace('\r', '\n')
+    }
+
+    private fun xmlToText(x: String): String {
+        var t = x.replace(Regex("</w:p>|</text:p>|</text:h>"), "\n\n")
+            .replace(Regex("<w:br/>|<w:br [^>]*/>|<text:line-break/>"), "\n")
+            .replace(Regex("<w:tab/>|<text:tab/>"), " ")
+            .replace(Regex("<[^>]+>"), "")
+        t = Regex("&#(\\d+);").replace(t) { String(Character.toChars(it.groupValues[1].toInt())) }
+        t = Regex("&#x([0-9a-fA-F]+);").replace(t) { String(Character.toChars(it.groupValues[1].toInt(16))) }
+        t = t.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+        return t.replace(Regex("\n{3,}"), "\n\n").trim()
     }
 
     private fun refreshDl(lang: String) {
