@@ -2,6 +2,7 @@ package com.tele.prompter
 
 import android.app.*
 import android.content.Intent
+import android.content.res.Configuration
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.media.AudioFormat
@@ -55,6 +56,8 @@ class OverlayService : Service(), RecognitionListener {
     private var lastProg = 0L
     private var pace = 0f
     private var acc = 0f
+    private var scrW = 0
+    private var scrH = 0
     companion object {
         @Volatile var frModel: Model? = null
         @Volatile var arModel: Model? = null
@@ -220,12 +223,51 @@ class OverlayService : Service(), RecognitionListener {
                 }
             }.start()
         }
+        screen().let { scrW = it.first; scrH = it.second }
         try { wm.addView(root, lp) } catch (e: Exception) {
             Toast.makeText(this, "Fenêtre impossible : autorisez « Afficher par-dessus les autres applis »", Toast.LENGTH_LONG).show()
             stopSelf(); return START_NOT_STICKY
         }
         show()
         return START_NOT_STICKY
+    }
+
+    // Taille réelle de l'écran dans l'orientation actuelle
+    private fun screen(): Pair<Int, Int> {
+        val d = resources.displayMetrics
+        var w = d.widthPixels; var hh = d.heightPixels
+        val land = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (land != (w > hh)) { val t = w; w = hh; hh = t }
+        return Pair(w, hh)
+    }
+
+    // Rotation du téléphone : la fenêtre garde ses proportions et suit l'écran
+    override fun onConfigurationChanged(c: Configuration) {
+        super.onConfigurationChanged(c)
+        if (!::root.isInitialized || root.parent == null) return
+        h.post { relayout() }
+    }
+
+    private fun relayout() {
+        if (!::root.isInitialized || root.parent == null) return
+        val (w, hh) = screen()
+        if (w == scrW && hh == scrH) return
+        val l0 = tv.layout
+        val topOff = if (l0 != null) l0.getLineStart(l0.getLineForVertical(sv.scrollY)) else 0
+        if (scrW > 0 && scrH > 0) {
+            lp.width = (lp.width.toLong() * w / scrW).toInt().coerceIn(min(350, w), w)
+            lp.height = (lp.height.toLong() * hh / scrH).toInt().coerceIn(min(350, hh), hh)
+            lp.x = (lp.x.toLong() * w / scrW).toInt().coerceIn(-lp.width + 120, w - 120)
+            lp.y = (lp.y.toLong() * hh / scrH).toInt().coerceIn(0, max(0, hh - 120))
+        }
+        scrW = w; scrH = hh
+        try { wm.updateViewLayout(root, lp) } catch (_: Exception) { return }
+        h.postDelayed({
+            val l = tv.layout ?: return@postDelayed
+            sv.scrollTo(0, l.getLineTop(l.getLineForOffset(min(topOff, tv.text.length))))
+            anchor = sv.scrollY
+            if (pos > 0) show()
+        }, 250)
     }
 
     private fun teardown() {

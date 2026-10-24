@@ -22,6 +22,9 @@ class MainActivity : Activity() {
     private lateinit var dl: Button
     private val arUrl = "https://alphacephei.com/vosk/models/vosk-model-ar-mgb2-0.4.zip"
     private val langs = listOf("fr-FR", "ar-SA", "en-US", "es-ES")
+    private val srcs = listOf(6, 5, 1, 9)
+    private lateinit var sp: Spinner
+    private lateinit var sp2: Spinner
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -33,18 +36,17 @@ class MainActivity : Activity() {
                 try { am.adjustStreamVolume(st, AudioManager.ADJUST_UNMUTE, 0) } catch (_: Exception) {}
         }
         if (intent.action == "com.tele.START") { go(); finish(); return }
-        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
+        if (b == null) requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
         et = EditText(this).apply {
             setText(p.getString("text", "")); hint = "Collez votre texte ici"
             gravity = Gravity.TOP
             layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
         }
-        val sp = Spinner(this).apply {
+        sp = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, langs)
             setSelection(langs.indexOf(p.getString("lang", "fr-FR")).coerceAtLeast(0))
         }
-        val srcs = listOf(6, 5, 1, 9)
-        val sp2 = Spinner(this).apply {
+        sp2 = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
                 listOf("Micro : reconnaissance vocale (conseillé)", "Micro : caméra (CAMCORDER)", "Micro : standard (MIC)", "Micro : non traité (UNPROCESSED)"))
             setSelection(srcs.indexOf(p.getInt("src2", 6)).coerceAtLeast(0))
@@ -73,6 +75,13 @@ class MainActivity : Activity() {
             addView(TextView(context).apply { text = "Langue de la voix :" })
             addView(sp); addView(sp2); addView(dl); addView(imp); addView(et); addView(acc); addView(btn)
         })
+    }
+
+    // Sauvegarde le texte en cours (sinon perdu en tournant le téléphone avant de lancer)
+    override fun onPause() {
+        super.onPause()
+        if (::et.isInitialized) getSharedPreferences("t", 0).edit().putString("text", et.text.toString())
+            .putString("lang", sp.selectedItem as String).putInt("src2", srcs[sp2.selectedItemPosition]).apply()
     }
 
     private fun a11yOn() = (Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: "").contains(packageName)
