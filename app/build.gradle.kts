@@ -9,8 +9,20 @@ android {
         applicationId = "com.tele.prompter"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+    }
+    // Clé fixe : chaque nouvel APK s'installe par-dessus l'ancien (sinon « paquet non valide »)
+    signingConfigs {
+        create("fixe") {
+            storeFile = file("prompteur.jks")
+            storePassword = "prompteur"
+            keyAlias = "prompteur"
+            keyPassword = "prompteur"
+        }
+    }
+    buildTypes {
+        getByName("debug") { signingConfig = signingConfigs.getByName("fixe") }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
