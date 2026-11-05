@@ -182,7 +182,7 @@ class OverlayService : Service(), RecognitionListener {
             orientation = LinearLayout.VERTICAL; setBackgroundColor((alphas[ai] shl 24) or 0x600000)
             addView(bar)
             alarm = TextView(this@OverlayService).apply {
-                text = "⚠ YouTube n'a PAS de son ! Coupez 🎤"; setTextColor(Color.WHITE); textSize = 18f
+                this.text = "⚠ YouTube n'a PAS de son ! Coupez 🎤"; setTextColor(Color.WHITE); textSize = 18f
                 gravity = Gravity.CENTER; setBackgroundColor(0xFFD50000.toInt()); visibility = View.GONE
                 setPadding(0, (8 * dp).toInt(), 0, (8 * dp).toInt())
                 setOnClickListener { if (voice) toggleVoice() }
