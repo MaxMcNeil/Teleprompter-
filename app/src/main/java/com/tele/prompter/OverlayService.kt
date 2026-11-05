@@ -57,6 +57,9 @@ class OverlayService : Service(), RecognitionListener {
     private var pace = 0f
     private var acc = 0f
     private lateinit var holder: FrameLayout
+    private lateinit var alarm: TextView
+    private var alarmOn = false
+    @Volatile private var mySess = -1
     private var orient: OrientationEventListener? = null
     @Volatile private var phys = -1
     private var rot = 0
@@ -177,7 +180,14 @@ class OverlayService : Service(), RecognitionListener {
         }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor((alphas[ai] shl 24) or 0x600000)
-            addView(bar); addView(sv); addView(foot)
+            addView(bar)
+            alarm = TextView(this@OverlayService).apply {
+                text = "⚠ YouTube n'a PAS de son ! Coupez 🎤"; setTextColor(Color.WHITE); textSize = 18f
+                gravity = Gravity.CENTER; setBackgroundColor(0xFFD50000.toInt()); visibility = View.GONE
+                setPadding(0, (8 * dp).toInt(), 0, (8 * dp).toInt())
+                setOnClickListener { if (voice) toggleVoice() }
+            }
+            addView(alarm); addView(sv); addView(foot)
         }
         lp = WindowManager.LayoutParams(
             100, 100,
@@ -250,6 +260,7 @@ class OverlayService : Service(), RecognitionListener {
             }
         }.also { if (it.canDetectOrientation()) it.enable() }
         h.post { update() }
+        h.removeCallbacks(watch); h.post(watch)
         show()
         return START_NOT_STICKY
     }
@@ -323,6 +334,27 @@ class OverlayService : Service(), RecognitionListener {
         root.layoutParams = FrameLayout.LayoutParams(lw, lh, Gravity.CENTER)
         root.rotation = rot.toFloat()
         if (apply) try { wm.updateViewLayout(holder, lp) } catch (_: Exception) {}
+    }
+
+    // Alarme anti-live muet : Android indique si une autre appli qui enregistre (YouTube) reçoit du silence
+    private val watch = object : Runnable {
+        override fun run() {
+            val bad = try {
+                getSystemService(AudioManager::class.java).activeRecordingConfigurations.any {
+                    it.isClientSilenced && it.clientAudioSessionId != mySess &&
+                        it.clientAudioSource != MediaRecorder.AudioSource.VOICE_RECOGNITION &&
+                        it.clientAudioSource != 1999 /* HOTWORD (« Ok Google ») */
+                }
+            } catch (_: Exception) { false }
+            if (bad != alarmOn) {
+                alarmOn = bad
+                alarm.visibility = if (bad) View.VISIBLE else View.GONE
+                if (bad) try {
+                    getSystemService(Vibrator::class.java)?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 200, 400, 200, 400), -1))
+                } catch (_: Exception) {}
+            }
+            h.postDelayed(this, 1000)
+        }
     }
 
     private fun teardown() {
@@ -402,11 +434,20 @@ class OverlayService : Service(), RecognitionListener {
     // Moteur hors ligne : capture micro de l'app (priorité accessibilité) et reconnaissance Vosk
     private fun startVosk() {
         val my = ++sess
-        val src = getSharedPreferences("t", 0).getInt("src2", MediaRecorder.AudioSource.VOICE_RECOGNITION)
-        val rate = if (src == MediaRecorder.AudioSource.VOICE_RECOGNITION) 16000 else 48000
+        // Toujours « reconnaissance vocale » : la seule source qu'Android partage entre le service
+        // d'accessibilité et l'appli au premier plan (YouTube garde alors son son)
+        val src = MediaRecorder.AudioSource.VOICE_RECOGNITION
+        val rate = 16000
         val f = rate / 16000
         val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val ar = try { AudioRecord(src, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, rate)) } catch (e: Exception) { null }
+        val ar = try {
+            val fmt = AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT).build()
+            val bld = AudioRecord.Builder().setAudioSource(src).setAudioFormat(fmt).setBufferSizeInBytes(max(minBuf, rate))
+            if (Build.VERSION.SDK_INT >= 30) bld.setPrivacySensitive(false)
+            bld.build()
+        } catch (e: Exception) { null }
+        if (ar != null) mySess = ar.audioSessionId
         if (ar == null || ar.state != AudioRecord.STATE_INITIALIZED) {
             Toast.makeText(this, "Micro indisponible (essayez une autre source micro)", Toast.LENGTH_LONG).show()
             ar?.release(); voice = false; mic.setTextColor(Color.WHITE); return
@@ -452,7 +493,7 @@ class OverlayService : Service(), RecognitionListener {
                     h.post {
                         if (sess == my) {
                             mic.text = "🎤" + "▁▃▅▇█"[lvl]
-                            if (warn) Toast.makeText(this, "Silence total : Android coupe le micro de l'app (la caméra l'occupe). Essayez une autre source micro.", Toast.LENGTH_LONG).show()
+                            if (warn) Toast.makeText(this, "Silence total : Android coupe le micro de Prompteur. Vérifiez le micro partagé (Accessibilité).", Toast.LENGTH_LONG).show()
                             heardJson(j, if (fin) "text" else "partial")
                         }
                     }
@@ -461,7 +502,7 @@ class OverlayService : Service(), RecognitionListener {
                 fail("Erreur micro : ${e.message}")
             } finally {
                 try { ar.stop() } catch (_: Exception) {}
-                ar.release(); rec.close()
+                ar.release(); rec.close(); if (sess == my) mySess = -1
             }
         }.start()
     }

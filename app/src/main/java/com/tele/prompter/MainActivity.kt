@@ -73,7 +73,7 @@ class MainActivity : Activity() {
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(32, 32, 32, 32); fitsSystemWindows = true
             addView(TextView(context).apply { text = "Langue de la voix :" })
-            addView(sp); addView(sp2); addView(dl); addView(imp); addView(et); addView(acc); addView(btn)
+            addView(sp); sp2.visibility = View.GONE; addView(sp2); addView(dl); addView(imp); addView(et); addView(acc); addView(btn)
         })
     }
 
