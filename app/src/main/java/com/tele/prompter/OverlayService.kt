@@ -531,9 +531,11 @@ class OverlayService : Service(), RecognitionListener {
     private var pending = -1
     private val splitter = Regex("[\\s'’\\-–—]+")
 
-    // Suivi : chaque mot entendu est cherché juste après la position actuelle (1 à 3 mots sautés si le mot
-    // est assez long) ; un saut plus loin (jusqu'à ~2 phrases) exige 2 mots consécutifs. Jamais de recherche
-    // au début/à la fin du texte, jamais de retour en arrière : ce qui est hors texte est ignoré.
+    // Suivi : chaque mot entendu est cherché à la position actuelle. Anti-saut (textes répétitifs) :
+    //  - un mot qu'on vient de lire (3 derniers mots) n'avance rien : l'orateur se répète ;
+    //  - sauter 1 à 3 mots exige un mot long ET confirmé par le mot entendu juste après ;
+    //  - un saut plus loin (≤ 40 mots) exige 3 mots consécutifs qui n'existent qu'UNE fois dans la zone ;
+    //  - on n'avance jamais plus de 2 mots de texte par mot prononcé (+6) ; jamais de retour en arrière.
     private fun onHeard(s: String, fin: Boolean) {
         val hw = s.split(splitter).map { norm(it) }.filter { it.isNotEmpty() }
         if (hw.isEmpty()) { if (fin) uttBase = -1; return }
@@ -543,20 +545,28 @@ class OverlayService : Service(), RecognitionListener {
         for (i in hw.indices) {
             val w = hw[i]
             var j = -1
-            for (d in 0..3) {
-                val q = p + d
-                if (q >= n) break
-                if (words[q] == w && (d == 0 || w.length >= 4)) { j = q; break }
-            }
-            if (j < 0 && i + 1 < hw.size && w.length + hw[i + 1].length >= 8) {
-                var q = p + 1
-                while (q < min(n - 1, p + 80)) {
-                    if (words[q] == w && words[q + 1] == hw[i + 1]) { j = q; break }
-                    q++
+            if (p < n && words[p] == w) j = p
+            else if ((max(0, p - 3) until p).any { words[it] == w }) { /* répétition : on ne bouge pas */ }
+            else {
+                val nxt = hw.getOrNull(i + 1)
+                for (d in 1..3) {
+                    val q = p + d
+                    if (q >= n) break
+                    if (words[q] == w && w.length >= 4) {
+                        if ((nxt != null && q + 1 < n && words[q + 1] == nxt) || (nxt == null && fin && w.length >= 5)) j = q
+                        break
+                    }
+                }
+                if (j < 0 && i + 2 < hw.size && w.length + hw[i + 1].length + hw[i + 2].length >= 12) {
+                    var hit = -1; var count = 0
+                    for (q in p + 1 until min(n - 2, p + 40))
+                        if (words[q] == w && words[q + 1] == hw[i + 1] && words[q + 2] == hw[i + 2]) { hit = q; count++ }
+                    if (count == 1) j = hit
                 }
             }
             if (j >= 0) p = j + 1
         }
+        p = min(p, uttBase + 2 * hw.size + 6)
         if (p > pos) {
             val now = SystemClock.uptimeMillis()
             val dt = max(150L, now - lastProg)

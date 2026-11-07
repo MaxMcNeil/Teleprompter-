@@ -11,6 +11,9 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.ZipInputStream
@@ -25,6 +28,8 @@ class MainActivity : Activity() {
     private val srcs = listOf(6, 5, 1, 9)
     private lateinit var sp: Spinner
     private lateinit var sp2: Spinner
+    private lateinit var histBtn: Button
+    private lateinit var histBox: LinearLayout
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -58,10 +63,7 @@ class MainActivity : Activity() {
         }
         val btn = Button(this).apply {
             text = "▶ Lancer le prompteur"
-            setOnClickListener {
-                p.edit().putString("text", et.text.toString()).putString("lang", sp.selectedItem as String).putInt("src2", srcs[sp2.selectedItemPosition]).apply()
-                go()
-            }
+            setOnClickListener { launch(et.text.toString()) }
         }
         val imp = Button(this).apply {
             text = "📂 Importer un fichier (txt, docx, odt, md)"
@@ -69,11 +71,16 @@ class MainActivity : Activity() {
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), 42)
             }
         }
+        histBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        histBtn = Button(this).apply {
+            setOnClickListener { histBox.visibility = if (histBox.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
+        }
+        refreshHist()
         acc = Button(this).apply { setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } }
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(32, 32, 32, 32); fitsSystemWindows = true
             addView(TextView(context).apply { text = "Langue de la voix :" })
-            addView(sp); sp2.visibility = View.GONE; addView(sp2); addView(dl); addView(imp); addView(et); addView(acc); addView(btn)
+            addView(sp); sp2.visibility = View.GONE; addView(sp2); addView(dl); addView(imp); addView(histBtn); addView(histBox); addView(et); addView(acc); addView(btn)
         })
     }
 
@@ -101,6 +108,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (t.isBlank()) Toast.makeText(this, "Fichier vide ou illisible", Toast.LENGTH_LONG).show()
                     else {
+                        archive(et.text.toString())
                         et.setText(t)
                         getSharedPreferences("t", 0).edit().putString("text", t).apply()
                         val warn = if (t.length > 500_000) " (seuls les 500 000 premiers seront lus)" else ""
@@ -191,6 +199,68 @@ class MainActivity : Activity() {
                 runOnUiThread { dl.isEnabled = true; dl.text = "Échec (${e.message}) – réessayer" }
             }
         }.start()
+    }
+
+    // ---------- Historique : les 5 derniers scripts (fichiers dans l'app, pas de limite de taille) ----------
+    private fun histDir() = File(filesDir, "hist").apply { mkdirs() }
+    private fun histFiles() = (histDir().listFiles()?.filter { it.name.endsWith(".txt") } ?: emptyList())
+        .sortedByDescending { it.name.removeSuffix(".txt").toLongOrNull() ?: 0L }
+
+    // Même script (petite correction au milieu) : on compare le début, sans tenir compte des espaces
+    private fun same(a: String, b: String): Boolean {
+        fun k(x: String) = x.replace(Regex("\\s+"), " ").trim().take(150)
+        return k(a) == k(b)
+    }
+
+    private fun archive(t: String) {
+        if (t.isBlank()) return
+        try {
+            histFiles().filter { same(it.readText(), t) }.forEach { it.delete() }
+            File(histDir(), "${System.currentTimeMillis()}.txt").writeText(t)
+            histFiles().drop(5).forEach { it.delete() }
+        } catch (_: Exception) {}
+        refreshHist()
+    }
+
+    private fun refreshHist() {
+        if (!::histBox.isInitialized) return
+        histBox.removeAllViews()
+        val fs = histFiles()
+        histBtn.text = "🕘 Historique : ${fs.size}/5 scripts"
+        if (fs.isEmpty()) { histBox.addView(TextView(this).apply { text = "Aucun script archivé pour l'instant." }); return }
+        histBox.addView(TextView(this).apply { text = "Appui = charger et lancer · appui long = charger seulement" })
+        val df = SimpleDateFormat("dd/MM HH:mm", Locale.FRANCE)
+        fs.forEachIndexed { i, f ->
+            val t = try { f.readText() } catch (_: Exception) { "" }
+            val start = t.replace(Regex("\\s+"), " ").trim().take(40)
+            val date = df.format(Date(f.name.removeSuffix(".txt").toLongOrNull() ?: f.lastModified()))
+            histBox.addView(Button(this).apply {
+                text = "${i + 1}. $start… · $date"; isAllCaps = false; gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                setOnClickListener { useHist(f, true) }
+                setOnLongClickListener { useHist(f, false); true }
+            })
+        }
+    }
+
+    // Le script choisi devient le script actuel ; l'actuel part dans l'historique
+    private fun useHist(f: File, start: Boolean) {
+        val t = try { f.readText() } catch (_: Exception) { return }
+        val cur = et.text.toString()
+        f.delete()
+        if (!same(cur, t)) archive(cur)
+        et.setText(t)
+        getSharedPreferences("t", 0).edit().putString("text", t).apply()
+        refreshHist(); histBox.visibility = View.GONE
+        if (start) launch(t) else Toast.makeText(this, "Script chargé : appuyez sur ▶ pour lancer", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun launch(t: String) {
+        val p = getSharedPreferences("t", 0)
+        val last = p.getString("launched", "") ?: ""
+        if (last.isNotBlank() && !same(last, t)) archive(last)
+        p.edit().putString("text", t).putString("launched", t).putString("lang", sp.selectedItem as String)
+            .putInt("src2", srcs[sp2.selectedItemPosition]).apply()
+        go()
     }
 
     private fun go() {
