@@ -58,6 +58,7 @@ class OverlayService : Service(), RecognitionListener {
     private var acc = 0f
     private lateinit var holder: FrameLayout
     private lateinit var alarm: TextView
+    private lateinit var diag: TextView
     private var alarmOn = false
     @Volatile private var mySess = -1
     private var orient: OrientationEventListener? = null
@@ -175,7 +176,11 @@ class OverlayService : Service(), RecognitionListener {
                 root.setBackgroundColor((alphas[ai] shl 24) or 0x600000)
                 Toast.makeText(this@OverlayService, "Opacité du fond : ${alphas[ai] * 100 / 255} %", Toast.LENGTH_SHORT).show()
             })
-            addView(View(this@OverlayService).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
+            diag = TextView(this@OverlayService).apply {
+                setTextColor(Color.WHITE); textSize = 12f; gravity = Gravity.CENTER; maxLines = 2
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            }
+            addView(diag)
             addView(grip)
         }
         root = LinearLayout(this).apply {
@@ -339,6 +344,16 @@ class OverlayService : Service(), RecognitionListener {
     // Alarme anti-live muet : Android indique si une autre appli qui enregistre (YouTube) reçoit du silence
     private val watch = object : Runnable {
         override fun run() {
+            // Diagnostic : ce qu'Android déclare sur le micro (Prompteur + les autres applis, ex. YouTube)
+            try {
+                val cs = getSystemService(AudioManager::class.java).activeRecordingConfigurations
+                val me = cs.firstOrNull { mySess != -1 && it.clientAudioSessionId == mySess }
+                val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
+                val cut = others.count { it.isClientSilenced }
+                val moi = when { me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
+                diag.text = "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
+                diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
+            } catch (_: Exception) { diag.text = "🎙 diagnostic indisponible" }
             val bad = try {
                 getSystemService(AudioManager::class.java).activeRecordingConfigurations.any {
                     it.isClientSilenced && it.clientAudioSessionId != mySess &&
