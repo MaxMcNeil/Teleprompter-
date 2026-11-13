@@ -59,6 +59,8 @@ class OverlayService : Service(), RecognitionListener {
     private lateinit var holder: FrameLayout
     private lateinit var alarm: TextView
     private lateinit var diag: TextView
+    private lateinit var gerr: TextView
+    private var lastErrAt = 0L
     private var google = false
     private var offline = true
     private var warnedG = false
@@ -201,7 +203,12 @@ class OverlayService : Service(), RecognitionListener {
                 setPadding(0, (8 * dp).toInt(), 0, (8 * dp).toInt())
                 setOnClickListener { if (voice) toggleVoice() }
             }
-            addView(alarm); addView(sv); addView(foot)
+            gerr = TextView(this@OverlayService).apply {
+                setTextColor(Color.WHITE); textSize = 15f; gravity = Gravity.CENTER
+                setBackgroundColor(0xFFE65100.toInt()); visibility = View.GONE
+                setPadding((8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt())
+            }
+            addView(alarm); addView(gerr); addView(sv); addView(foot)
         }
         lp = WindowManager.LayoutParams(
             100, 100,
@@ -362,7 +369,7 @@ class OverlayService : Service(), RecognitionListener {
                 val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
                 val cut = others.count { it.isClientSilenced }
                 val moi = when { google && voice -> "Google"; me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
-                diag.text = if (google && voice) "🎙 Google : écoute · relances $starts" + (if (lastErr > 0) " · err $lastErr" else "") +
+                diag.text = if (google && voice) "🎙 Google : écoute · relances $starts" +
                     "\nAutres applis : ${others.size} · coupées : $cut"
                 else "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
@@ -381,6 +388,10 @@ class OverlayService : Service(), RecognitionListener {
                     getSystemService(Vibrator::class.java)?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 200, 400, 200, 400), -1))
                 } catch (_: Exception) {}
             }
+            // Erreur Google en clair, sur sa propre ligne (visible 10 s après la dernière erreur)
+            val showErr = google && voice && lastErr > 0 && SystemClock.uptimeMillis() - lastErrAt < 10000
+            gerr.visibility = if (showErr) View.VISIBLE else View.GONE
+            if (showErr) gerr.text = "⚠ Erreur $lastErr : " + errText(lastErr)
             // Chien de garde Google : moteur muet depuis 5 s, ou aucun mot reconnu depuis 15 s → moteur neuf
             if (google && voice) {
                 val now = SystemClock.uptimeMillis()
@@ -660,7 +671,7 @@ class OverlayService : Service(), RecognitionListener {
             if (voice) { h.removeCallbacks(relaunch); h.postDelayed(relaunch, 100) }
             return
         }
-        lastErr = e
+        lastErr = e; lastErrAt = SystemClock.uptimeMillis()
         if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             Toast.makeText(this, "Micro refusé : autorisez-le dans les réglages de l'app", Toast.LENGTH_LONG).show()
             voice = false; mic.setTextColor(Color.WHITE); if (muted) muteBeep(false); return
@@ -675,6 +686,20 @@ class OverlayService : Service(), RecognitionListener {
         }
         restart()
     }
+    private fun errText(e: Int) = when (e) {
+        1 -> "réseau trop lent"
+        2 -> "pas de réseau"
+        3 -> "le téléphone refuse le micro à Google (occupé par une autre appli)"
+        4 -> "serveur Google en erreur"
+        5 -> "moteur Google en erreur (relance)"
+        8 -> "moteur Google occupé (relance)"
+        9 -> "Google n'a pas l'autorisation du micro"
+        10 -> "trop de demandes à Google"
+        11 -> "service Google déconnecté (relance)"
+        12, 13 -> "langue indisponible hors ligne (passage en ligne)"
+        else -> "erreur inconnue"
+    }
+
     override fun onPartialResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, false) }
     override fun onResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, true); restart() }
 
