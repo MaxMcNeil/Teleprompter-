@@ -2,6 +2,7 @@ package com.tele.prompter
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
@@ -213,10 +214,20 @@ class MainActivity : Activity() {
     private fun histFiles() = (histDir().listFiles()?.filter { it.name.endsWith(".txt") } ?: emptyList())
         .sortedByDescending { it.name.removeSuffix(".txt").toLongOrNull() ?: 0L }
 
-    // Même script (petite correction au milieu) : on compare le début, sans tenir compte des espaces
+    // Même script = texte entier quasi identique (une petite correction à un endroit, ≥ 97 % commun).
+    // Deux scripts différents qui commencent pareil (même accroche) sont bien gardés tous les deux.
     private fun same(a: String, b: String): Boolean {
-        fun k(x: String) = x.replace(Regex("\\s+"), " ").trim().take(150)
-        return k(a) == k(b)
+        val x = a.replace(Regex("\\s+"), " ").trim()
+        val y = b.replace(Regex("\\s+"), " ").trim()
+        if (x == y) return true
+        val m = maxOf(x.length, y.length)
+        if (Math.abs(x.length - y.length) > m * 0.03) return false
+        val n = minOf(x.length, y.length)
+        var p = 0
+        while (p < n && x[p] == y[p]) p++
+        var q = 0
+        while (q < n - p && x[x.length - 1 - q] == y[y.length - 1 - q]) q++
+        return p + q >= m * 0.97
     }
 
     private fun archive(t: String) {
@@ -233,8 +244,11 @@ class MainActivity : Activity() {
         if (!::histBox.isInitialized) return
         histBox.removeAllViews()
         val fs = histFiles()
-        histBtn.text = "🕘 Historique : ${fs.size}/5 scripts"
-        if (fs.isEmpty()) { histBox.addView(TextView(this).apply { text = "Aucun script archivé pour l'instant." }); return }
+        histBtn.text = "🕘 Historique : ${fs.size} ancien${if (fs.size > 1) "s" else ""} script${if (fs.size > 1) "s" else ""} (max 5)"
+        histBox.addView(TextView(this).apply {
+            text = "Le script actuel est celui de l'éditeur ci-dessous : il rejoint l'historique dès que tu en lances un autre."
+        })
+        if (fs.isEmpty()) { histBox.addView(TextView(this).apply { text = "Aucun ancien script pour l'instant." }); return }
         histBox.addView(TextView(this).apply { text = "Appui = charger et lancer · appui long = charger seulement" })
         val df = SimpleDateFormat("dd/MM HH:mm", Locale.FRANCE)
         fs.forEachIndexed { i, f ->
@@ -247,6 +261,19 @@ class MainActivity : Activity() {
                 setOnLongClickListener { useHist(f, false); true }
             })
         }
+        histBox.addView(Button(this).apply {
+            text = "🗑 Vider l'historique"; isAllCaps = false
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setMessage("Supprimer les ${fs.size} ancien(s) script(s) de l'historique ?\nLe script actuel (dans l'éditeur) est conservé.")
+                    .setPositiveButton("Supprimer") { _, _ ->
+                        histFiles().forEach { try { it.delete() } catch (_: Exception) {} }
+                        refreshHist()
+                        Toast.makeText(this@MainActivity, "Historique vidé", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Annuler", null).show()
+            }
+        })
     }
 
     // Le script choisi devient le script actuel ; l'actuel part dans l'historique
