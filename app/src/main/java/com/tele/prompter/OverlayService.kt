@@ -62,18 +62,6 @@ class OverlayService : Service(), RecognitionListener {
     private lateinit var holder: FrameLayout
     private lateinit var alarm: TextView
     private lateinit var diag: TextView
-    private lateinit var gerr: TextView
-    private var lastErrAt = 0L
-    private var google = false
-    private var offline = true
-    private var warnedG = false
-    @Volatile private var lastEvt = 0L
-    private var lastText = 0L
-    private var starts = 0
-    private var creates = 0
-    private var lastCreate = 0L
-    private var needFresh = false
-    private var lastErr = 0
     private var alarmOn = false
     @Volatile private var mySess = -1
     private var orient: OrientationEventListener? = null
@@ -135,8 +123,6 @@ class OverlayService : Service(), RecognitionListener {
         if (p.getBoolean("muted", false)) muteBeep(false)
         val text = (p.getString("text", "") ?: "").take(500_000)
         lang = p.getString("lang", "fr-FR") ?: "fr-FR"
-        google = p.getString("engine", "vosk") == "google"
-        offline = false; errs = 0
         Regex("[^\\s'’\\-–—]+").findAll(text).forEach { val w = norm(it.value); if (w.isNotEmpty()) { words.add(w); st.add(it.range.first); en.add(it.range.last + 1) } }
         if (words.isEmpty()) { Toast.makeText(this, "Texte vide", Toast.LENGTH_SHORT).show(); stopSelf(); return START_NOT_STICKY }
 
@@ -209,12 +195,7 @@ class OverlayService : Service(), RecognitionListener {
                 setPadding(0, (8 * dp).toInt(), 0, (8 * dp).toInt())
                 setOnClickListener { if (voice) toggleVoice() }
             }
-            gerr = TextView(this@OverlayService).apply {
-                setTextColor(Color.WHITE); textSize = 15f; gravity = Gravity.CENTER
-                setBackgroundColor(0xFFE65100.toInt()); visibility = View.GONE
-                setPadding((8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt())
-            }
-            addView(alarm); addView(gerr); addView(sv); addView(foot)
+            addView(alarm); addView(sv); addView(foot)
         }
         lp = WindowManager.LayoutParams(
             100, 100,
@@ -256,9 +237,7 @@ class OverlayService : Service(), RecognitionListener {
         }
         model = null; modelFailed = false
         val arDir = File(filesDir, "models/ar").listFiles()?.firstOrNull { it.isDirectory }
-        if (google) {
-            // Moteur Google : pas de modèle Vosk à charger
-        } else if (lang.startsWith("fr")) {
+        if (lang.startsWith("fr")) {
             model = frModel
             if (model == null) StorageService.unpack(this, "model-fr", "model",
                 { m -> frModel = m; if (lang.startsWith("fr")) model = m },
@@ -374,10 +353,8 @@ class OverlayService : Service(), RecognitionListener {
                 val me = cs.firstOrNull { mySess != -1 && it.clientAudioSessionId == mySess }
                 val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
                 val cut = others.count { it.isClientSilenced }
-                val moi = when { google && voice -> "Google"; me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
-                diag.text = if (google && voice) "🎙 Google ${if (offline) "hors ligne" else "en ligne"} · relances $starts · moteurs $creates" +
-                    "\nAutres applis : ${others.size} · coupées : $cut"
-                else "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
+                val moi = when { me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
+                diag.text = "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
             } catch (_: Exception) { diag.text = "🎙 diagnostic indisponible" }
             val bad = try {
@@ -393,16 +370,6 @@ class OverlayService : Service(), RecognitionListener {
                 if (bad) try {
                     getSystemService(Vibrator::class.java)?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 200, 400, 200, 400), -1))
                 } catch (_: Exception) {}
-            }
-            // Erreur Google en clair, sur sa propre ligne (visible 10 s après la dernière erreur)
-            val showErr = google && voice && lastErr > 0 && SystemClock.uptimeMillis() - lastErrAt < 10000
-            gerr.visibility = if (showErr) View.VISIBLE else View.GONE
-            if (showErr) gerr.text = "⚠ Erreur $lastErr : " + errText(lastErr)
-            // Chien de garde Google : aucun signe de vie depuis 8 s (pas même un niveau de micro) → moteur neuf
-            // (au plus une fois toutes les 10 s). Un long silence de ta part n'est PAS un blocage.
-            if (google && voice) {
-                val now = SystemClock.uptimeMillis()
-                if (now - lastEvt > 8000) listen(true)
             }
             h.postDelayed(this, 1000)
         }
@@ -469,14 +436,6 @@ class OverlayService : Service(), RecognitionListener {
         auto = false; play.text = "▶"
         pace = 0f; lastProg = 0L; uttBase = -1; stuckUtt = 0; acc = 0f
         anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
-        if (google) {
-            // Moteur Google : c'est le service de reconnaissance du téléphone qui ouvre le micro
-            if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-                Toast.makeText(this, "Reconnaissance vocale Google absente du téléphone : choisissez Vosk", Toast.LENGTH_LONG).show()
-                voice = false; mic.setTextColor(Color.WHITE); return
-            }
-            errs = 0; warnedG = false; starts = 0; creates = 0; needFresh = false; lastErr = 0; lastText = SystemClock.uptimeMillis(); muteBeep(true); listen(); return
-        }
         if (model != null) { startVosk(); return }
         val expect = lang.startsWith("fr") || (lang.startsWith("ar") && File(filesDir, "models/ar.ok").exists())
         if (expect && !modelFailed) {
@@ -572,42 +531,15 @@ class OverlayService : Service(), RecognitionListener {
         try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t, key == "text") else if (key == "text") endUtt() } catch (_: Exception) {}
     }
 
-    // Chaque écoute repart d'un moteur Google NEUF : certains téléphones refusent de relancer
-    // le même moteur après la première phrase (le suivi s'arrêtait après une phrase).
-    // On garde le MÊME moteur Google et on le relance. On n'en crée un neuf que s'il est cassé
-    // (erreurs 5/8/11 ou plus aucun signe de vie), et jamais plus d'une fois toutes les 10 s :
-    // en créer trop provoque l'erreur 10 « trop de demandes ».
-    private fun listen(fresh: Boolean = false) {
-        if (!voice) return
-        h.removeCallbacks(relaunch)
-        val now = SystemClock.uptimeMillis()
-        lastEvt = now; starts++
-        try {
-            if (sr == null || (fresh && now - lastCreate > 10000)) {
-                try { sr?.destroy() } catch (_: Exception) {}
-                sr = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
-                lastCreate = now; creates++
-            } else try { sr?.cancel() } catch (_: Exception) {}
-            sr!!.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
-                .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-                // Hors ligne si le pack de langue est installé (moins d'Internet) ; sinon on repasse en ligne
-                .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, offline)
-                // Attendre plus longtemps avant de couper la phrase (Google ne le respecte pas toujours)
-                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
-                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L))
-        } catch (e: Exception) { errs++; needFresh = true; restart(1500) }
+    private fun listen() {
+        if (sr == null) sr = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
+        sr!!.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang))
     }
 
-    // Relance rapide (jamais plus d'une seconde), une seule relance en attente à la fois
-    private val relaunch = Runnable { if (voice) { val f = needFresh; needFresh = false; listen(f) } }
-    private fun restart(delay: Long = 300) {
-        if (!voice) return
-        h.removeCallbacks(relaunch)
-        h.postDelayed(relaunch, delay)
-    }
+    private fun restart() { if (voice) h.postDelayed({ if (voice) listen() }, min(3000L, 150L + errs * 300L)) }
 
     private fun heard(b: Bundle?, fin: Boolean) {
         errs = 0
@@ -717,62 +649,21 @@ class OverlayService : Service(), RecognitionListener {
         return max(pos, c[3].toInt() + 1)
     }
 
-    override fun onReadyForSpeech(p: Bundle?) { lastEvt = SystemClock.uptimeMillis() }
-    override fun onBeginningOfSpeech() { lastEvt = SystemClock.uptimeMillis() }
-    override fun onRmsChanged(r: Float) {
-        lastEvt = SystemClock.uptimeMillis()
-        if (voice && google) mic.text = "🎤" + "▁▃▅▇█"[((r + 2f) / 3f).toInt().coerceIn(0, 4)]
-    }
+    override fun onReadyForSpeech(p: Bundle?) {}
+    override fun onBeginningOfSpeech() {}
+    override fun onRmsChanged(r: Float) {}
     override fun onBufferReceived(b: ByteArray?) {}
     override fun onEndOfSpeech() {}
     override fun onEvent(t: Int, b: Bundle?) {}
     override fun onError(e: Int) {
-        lastEvt = SystemClock.uptimeMillis()
-        // Silence (même 30 s ou plus) : Google s'arrête faute de parole. Ce n'est pas une panne :
-        // on relance tout de suite, sans compter d'erreur ni ralentir. Le texte reste immobile.
-        if (e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || e == SpeechRecognizer.ERROR_NO_MATCH) {
-            restart(300)
-            return
-        }
-        lastErr = e; lastErrAt = SystemClock.uptimeMillis()
         if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             Toast.makeText(this, "Micro refusé : autorisez-le dans les réglages de l'app", Toast.LENGTH_LONG).show()
             voice = false; mic.setTextColor(Color.WHITE); if (muted) muteBeep(false); return
         }
-        // En ligne par défaut : la reconnaissance hors ligne de Google ne gère qu'une écoute à la fois
-        // et répond « trop de demandes » (10) si une autre appli l'utilise déjà (ex. pendant le live).
-        // 10 / langue indisponible hors ligne → en ligne ; pas de réseau → on tente le hors ligne.
-        if (offline && (e == 10 || e == 12 || e == 13)) offline = false
-        else if (!offline && (e == SpeechRecognizer.ERROR_NETWORK || e == SpeechRecognizer.ERROR_NETWORK_TIMEOUT || e == SpeechRecognizer.ERROR_SERVER)) offline = true
-        errs++
-        // 10 = trop de demandes : on patiente 3 s avec le même moteur. 5/8/11 = moteur cassé : moteur neuf.
-        val delay = when (e) {
-            10 -> 1500L
-            SpeechRecognizer.ERROR_CLIENT, SpeechRecognizer.ERROR_RECOGNIZER_BUSY, 11 -> { needFresh = true; 1500L }
-            else -> min(3000L, 500L + errs * 300L)
-        }
-        if (errs >= 15 && !warnedG) {
-            warnedG = true
-            Toast.makeText(this, "La reconnaissance Google répond mal (réseau ?). Le suivi reprendra dès qu'elle répond.", Toast.LENGTH_LONG).show()
-        }
-        restart(delay)
+        errs++; restart()
     }
-    private fun errText(e: Int) = when (e) {
-        1 -> "réseau trop lent"
-        2 -> "pas de réseau"
-        3 -> "le téléphone refuse le micro à Google (occupé par une autre appli)"
-        4 -> "serveur Google en erreur"
-        5 -> "moteur Google en erreur (relance)"
-        8 -> "moteur Google occupé (relance)"
-        9 -> "Google n'a pas l'autorisation du micro"
-        10 -> "trop de demandes à Google"
-        11 -> "service Google déconnecté (relance)"
-        12, 13 -> "langue indisponible hors ligne (passage en ligne)"
-        else -> "erreur inconnue"
-    }
-
-    override fun onPartialResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, false) }
-    override fun onResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, true); restart(250) }
+    override fun onPartialResults(b: Bundle?) = heard(b, false)
+    override fun onResults(b: Bundle?) { heard(b, true); restart() }
 
     override fun onDestroy() {
         if (muted) muteBeep(false)
