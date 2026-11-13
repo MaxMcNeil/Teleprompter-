@@ -29,6 +29,7 @@ class MainActivity : Activity() {
     private lateinit var sp: Spinner
     private lateinit var sp2: Spinner
     private lateinit var histBtn: Button
+    private lateinit var eng: Spinner
     private lateinit var histBox: LinearLayout
 
     override fun onCreate(b: Bundle?) {
@@ -56,6 +57,11 @@ class MainActivity : Activity() {
                 listOf("Micro : reconnaissance vocale (conseillé)", "Micro : caméra (CAMCORDER)", "Micro : standard (MIC)", "Micro : non traité (UNPROCESSED)"))
             setSelection(srcs.indexOf(p.getInt("src2", 6)).coerceAtLeast(0))
         }
+        eng = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("Moteur vocal : Vosk (hors ligne)", "Moteur vocal : Google (pour les lives YouTube)"))
+            setSelection(if (p.getString("engine", "vosk") == "google") 1 else 0)
+        }
         dl = Button(this).apply { visibility = View.GONE; setOnClickListener { downloadAr() } }
         sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, i: Int, id: Long) { refreshDl(sp.selectedItem as String) }
@@ -80,7 +86,7 @@ class MainActivity : Activity() {
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(32, 32, 32, 32); fitsSystemWindows = true
             addView(TextView(context).apply { text = "Langue de la voix :" })
-            addView(sp); sp2.visibility = View.GONE; addView(sp2); addView(dl); addView(imp); addView(histBtn); addView(histBox); addView(et); addView(acc); addView(btn)
+            addView(sp); addView(eng); sp2.visibility = View.GONE; addView(sp2); addView(dl); addView(imp); addView(histBtn); addView(histBox); addView(et); addView(acc); addView(btn)
         })
     }
 
@@ -88,7 +94,8 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         if (::et.isInitialized) getSharedPreferences("t", 0).edit().putString("text", et.text.toString())
-            .putString("lang", sp.selectedItem as String).putInt("src2", srcs[sp2.selectedItemPosition]).apply()
+            .putString("lang", sp.selectedItem as String).putInt("src2", srcs[sp2.selectedItemPosition])
+            .putString("engine", if (eng.selectedItemPosition == 1) "google" else "vosk").apply()
     }
 
     private fun a11yOn() = (Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: "").contains(packageName)
@@ -259,6 +266,7 @@ class MainActivity : Activity() {
         val last = p.getString("launched", "") ?: ""
         if (last.isNotBlank() && !same(last, t)) archive(last)
         p.edit().putString("text", t).putString("launched", t).putString("lang", sp.selectedItem as String)
+            .putString("engine", if (eng.selectedItemPosition == 1) "google" else "vosk")
             .putInt("src2", srcs[sp2.selectedItemPosition]).apply()
         go()
     }

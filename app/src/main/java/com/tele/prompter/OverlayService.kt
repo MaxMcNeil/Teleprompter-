@@ -59,6 +59,9 @@ class OverlayService : Service(), RecognitionListener {
     private lateinit var holder: FrameLayout
     private lateinit var alarm: TextView
     private lateinit var diag: TextView
+    private var google = false
+    private var offline = true
+    private var warnedG = false
     private var alarmOn = false
     @Volatile private var mySess = -1
     private var orient: OrientationEventListener? = null
@@ -120,6 +123,8 @@ class OverlayService : Service(), RecognitionListener {
         if (p.getBoolean("muted", false)) muteBeep(false)
         val text = (p.getString("text", "") ?: "").take(500_000)
         lang = p.getString("lang", "fr-FR") ?: "fr-FR"
+        google = p.getString("engine", "vosk") == "google"
+        offline = true; errs = 0
         Regex("[^\\s'’\\-–—]+").findAll(text).forEach { val w = norm(it.value); if (w.isNotEmpty()) { words.add(w); st.add(it.range.first); en.add(it.range.last + 1) } }
         if (words.isEmpty()) { Toast.makeText(this, "Texte vide", Toast.LENGTH_SHORT).show(); stopSelf(); return START_NOT_STICKY }
 
@@ -234,7 +239,9 @@ class OverlayService : Service(), RecognitionListener {
         }
         model = null; modelFailed = false
         val arDir = File(filesDir, "models/ar").listFiles()?.firstOrNull { it.isDirectory }
-        if (lang.startsWith("fr")) {
+        if (google) {
+            // Moteur Google : pas de modèle Vosk à charger
+        } else if (lang.startsWith("fr")) {
             model = frModel
             if (model == null) StorageService.unpack(this, "model-fr", "model",
                 { m -> frModel = m; if (lang.startsWith("fr")) model = m },
@@ -350,7 +357,7 @@ class OverlayService : Service(), RecognitionListener {
                 val me = cs.firstOrNull { mySess != -1 && it.clientAudioSessionId == mySess }
                 val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
                 val cut = others.count { it.isClientSilenced }
-                val moi = when { me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
+                val moi = when { google && voice -> "Google"; me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
                 diag.text = "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
             } catch (_: Exception) { diag.text = "🎙 diagnostic indisponible" }
@@ -433,6 +440,14 @@ class OverlayService : Service(), RecognitionListener {
         auto = false; play.text = "▶"
         pace = 0f; lastProg = 0L; uttBase = -1; acc = 0f
         anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
+        if (google) {
+            // Moteur Google : c'est le service de reconnaissance du téléphone qui ouvre le micro
+            if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                Toast.makeText(this, "Reconnaissance vocale Google absente du téléphone : choisissez Vosk", Toast.LENGTH_LONG).show()
+                voice = false; mic.setTextColor(Color.WHITE); return
+            }
+            errs = 0; warnedG = false; muteBeep(true); listen(); return
+        }
         if (model != null) { startVosk(); return }
         val expect = lang.startsWith("fr") || (lang.startsWith("ar") && File(filesDir, "models/ar.ok").exists())
         if (expect && !modelFailed) {
@@ -529,14 +544,30 @@ class OverlayService : Service(), RecognitionListener {
     }
 
     private fun listen() {
+        if (!voice) return
         if (sr == null) sr = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
-        sr!!.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang))
+        try {
+            sr!!.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+                .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                // Hors ligne si le pack de langue est installé (moins d'Internet) ; sinon on repasse en ligne
+                .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, offline)
+                // Attendre plus longtemps avant de couper la phrase (Google ne le respecte pas toujours)
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15000L))
+        } catch (e: Exception) { errs++; restart() }
     }
 
-    private fun restart() { if (voice) h.postDelayed({ if (voice) listen() }, min(3000L, 150L + errs * 300L)) }
+    // Relance rapide (jamais plus d'une seconde), une seule relance en attente à la fois
+    private val relaunch = Runnable { if (voice) listen() }
+    private fun restart() {
+        if (!voice) return
+        h.removeCallbacks(relaunch)
+        h.postDelayed(relaunch, min(1000L, 100L + errs * 150L))
+    }
 
     private fun heard(b: Bundle?, fin: Boolean) {
         errs = 0
@@ -605,7 +636,15 @@ class OverlayService : Service(), RecognitionListener {
             Toast.makeText(this, "Micro refusé : autorisez-le dans les réglages de l'app", Toast.LENGTH_LONG).show()
             voice = false; mic.setTextColor(Color.WHITE); if (muted) muteBeep(false); return
         }
-        errs++; restart()
+        // Pack hors ligne absent / langue indisponible hors ligne : on repasse en ligne
+        if (offline && (e == SpeechRecognizer.ERROR_NETWORK || e == SpeechRecognizer.ERROR_SERVER || e == 12 || e == 13)) offline = false
+        if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || e == SpeechRecognizer.ERROR_CLIENT) try { sr?.cancel() } catch (_: Exception) {}
+        errs++
+        if (errs >= 15 && !warnedG) {
+            warnedG = true
+            Toast.makeText(this, "La reconnaissance Google répond mal (réseau ?). Le défilement continue.", Toast.LENGTH_LONG).show()
+        }
+        restart()
     }
     override fun onPartialResults(b: Bundle?) = heard(b, false)
     override fun onResults(b: Bundle?) { heard(b, true); restart() }
