@@ -53,6 +53,9 @@ class OverlayService : Service(), RecognitionListener {
     @Volatile private var sess = 0
     private var errs = 0
     private var uttBase = -1
+    private var uttStart = 0
+    private var kAdv = 0
+    private var stuckUtt = 0
     private var lastProg = 0L
     private var pace = 0f
     private var acc = 0f
@@ -168,7 +171,7 @@ class OverlayService : Service(), RecognitionListener {
             if (e.action == MotionEvent.ACTION_DOWN) { tx = e.x; ty = e.y; tt = e.eventTime }
             else if (e.action == MotionEvent.ACTION_UP && abs(e.x - tx) < 20 && abs(e.y - ty) < 20 && e.eventTime - tt < 300) {
                 val off = tv.getOffsetForPosition(e.x, e.y)
-                pos = max(0, st.indexOfLast { it <= off }); uttBase = -1; show()
+                pos = max(0, st.indexOfLast { it <= off }); uttBase = -1; stuckUtt = 0; show()
             }
             false
         }
@@ -455,7 +458,7 @@ class OverlayService : Service(), RecognitionListener {
         if (words.isEmpty() || tv.layout == null) return
         val y = max(0, sv.scrollY + dir * sv.height * 6 / 10)
         val off = tv.getOffsetForPosition(24f, (y + sv.height / 3).toFloat())
-        pending = -1; uttBase = -1
+        pending = -1; uttBase = -1; stuckUtt = 0
         pos = max(0, st.indexOfLast { it <= off }); show()
     }
 
@@ -464,7 +467,7 @@ class OverlayService : Service(), RecognitionListener {
         mic.setTextColor(if (voice) 0xFFFFEB3B.toInt() else Color.WHITE)
         if (!voice) { mic.text = "🎤"; sr?.cancel(); stopVosk(); if (muted) muteBeep(false); return }
         auto = false; play.text = "▶"
-        pace = 0f; lastProg = 0L; uttBase = -1; acc = 0f
+        pace = 0f; lastProg = 0L; uttBase = -1; stuckUtt = 0; acc = 0f
         anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
         if (google) {
             // Moteur Google : c'est le service de reconnaissance du téléphone qui ouvre le micro
@@ -566,7 +569,7 @@ class OverlayService : Service(), RecognitionListener {
     private fun stopVosk() { sess++ }
 
     private fun heardJson(j: String, key: String) {
-        try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t, key == "text") else if (key == "text") uttBase = -1 } catch (_: Exception) {}
+        try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t, key == "text") else if (key == "text") endUtt() } catch (_: Exception) {}
     }
 
     // Chaque écoute repart d'un moteur Google NEUF : certains téléphones refusent de relancer
@@ -621,8 +624,8 @@ class OverlayService : Service(), RecognitionListener {
     //  - on n'avance jamais plus de 2 mots de texte par mot prononcé (+6) ; jamais de retour en arrière.
     private fun onHeard(s: String, fin: Boolean) {
         val hw = s.split(splitter).map { norm(it) }.filter { it.isNotEmpty() }
-        if (hw.isEmpty()) { if (fin) uttBase = -1; return }
-        if (uttBase < 0) uttBase = pos
+        if (hw.isEmpty()) { if (fin) endUtt(); return }
+        if (uttBase < 0) { uttBase = pos; uttStart = pos; kAdv = 0 }
         val n = words.size
         var p = uttBase
         for (i in hw.indices) {
@@ -650,6 +653,14 @@ class OverlayService : Service(), RecognitionListener {
             if (j >= 0) p = j + 1
         }
         p = min(p, uttBase + 2 * hw.size + 6)
+        if (p > pos) kAdv = hw.size
+        else if (hw.size - kAdv >= 4) {
+            // Rattrapage : le suivi mot à mot est perdu (mots mal reconnus). On recale sur les mots
+            // entendus DEPUIS la dernière avance, seulement avec des preuves solides et sans ambiguïté.
+            // Perdu depuis 2 phrases → on cherche dans tout le reste du texte.
+            val q = catchUp(hw.subList(max(kAdv, hw.size - 8), hw.size), if (stuckUtt >= 2) words.size else 60)
+            if (q > pos) { p = q; kAdv = hw.size }
+        }
         if (p > pos) {
             val now = SystemClock.uptimeMillis()
             val dt = max(150L, now - lastProg)
@@ -659,7 +670,51 @@ class OverlayService : Service(), RecognitionListener {
             }
             lastProg = now; pos = p; show()
         }
-        if (fin) uttBase = -1
+        if (fin) endUtt()
+    }
+
+    private fun endUtt() {
+        if (uttBase >= 0) stuckUtt = if (pos > uttStart) 0 else stuckUtt + 1
+        uttBase = -1; kAdv = 0
+    }
+
+    // Suit les mots entendus à partir du mot s du texte ; renvoie score, nb de mots longs, premier, dernier
+    private fun greedy(hw: List<String>, s: Int): FloatArray {
+        val n = words.size
+        var p = s; var score = 0f; var L = 0; var first = -1; var last = -1
+        for (w in hw) {
+            var j = -1
+            for (d in 0..3) {
+                val q = p + d
+                if (q >= n) break
+                if (words[q] == w && (d <= 1 || w.length >= 4)) { j = q; break }
+            }
+            if (j >= 0) {
+                if (first < 0) first = j
+                score += (if (w.length >= 4) 1f else 0.35f) - 0.15f * (j - p)
+                if (w.length >= 4) L++
+                p = j + 1; last = j
+            } else score -= 0.25f
+        }
+        return floatArrayOf(score, L.toFloat(), first.toFloat(), last.toFloat())
+    }
+
+    private fun catchUp(hw: List<String>, k: Int): Int {
+        val n = words.size
+        val cs = ArrayList<FloatArray>()
+        for (s in pos until min(n, pos + k)) {
+            val g = greedy(hw, s)
+            if (g[3] < 0f || g[2].toInt() != s) continue
+            cs.add(floatArrayOf(g[0] - 0.02f * (s - pos), s.toFloat(), g[1], g[3]))
+        }
+        if (cs.isEmpty()) return pos
+        val s1 = cs.maxOf { it[0] }
+        val c = cs.filter { it[0] >= s1 - 0.5f }.minByOrNull { it[1] } ?: return pos
+        val sc = c[0]; val s = c[1].toInt(); val L = c[2].toInt()
+        if (L < 3 || sc < 2.5f) return pos                       // pas assez de preuves
+        if (s - pos > 25 && (L < 4 || sc < 3.5f)) return pos     // grand saut : encore plus de preuves
+        if (cs.any { abs(it[1] - s) > 10 && it[0] >= sc - 1f }) return pos   // passage répété ailleurs : on ne saute pas
+        return max(pos, c[3].toInt() + 1)
     }
 
     override fun onReadyForSpeech(p: Bundle?) { lastEvt = SystemClock.uptimeMillis() }
