@@ -133,7 +133,7 @@ class OverlayService : Service(), RecognitionListener {
         val text = (p.getString("text", "") ?: "").take(500_000)
         lang = p.getString("lang", "fr-FR") ?: "fr-FR"
         google = p.getString("engine", "vosk") == "google"
-        offline = true; errs = 0
+        offline = false; errs = 0
         Regex("[^\\s'’\\-–—]+").findAll(text).forEach { val w = norm(it.value); if (w.isNotEmpty()) { words.add(w); st.add(it.range.first); en.add(it.range.last + 1) } }
         if (words.isEmpty()) { Toast.makeText(this, "Texte vide", Toast.LENGTH_SHORT).show(); stopSelf(); return START_NOT_STICKY }
 
@@ -372,7 +372,7 @@ class OverlayService : Service(), RecognitionListener {
                 val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
                 val cut = others.count { it.isClientSilenced }
                 val moi = when { google && voice -> "Google"; me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
-                diag.text = if (google && voice) "🎙 Google : écoute · relances $starts · moteurs $creates" +
+                diag.text = if (google && voice) "🎙 Google ${if (offline) "hors ligne" else "en ligne"} · relances $starts · moteurs $creates" +
                     "\nAutres applis : ${others.size} · coupées : $cut"
                 else "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
@@ -684,12 +684,15 @@ class OverlayService : Service(), RecognitionListener {
             Toast.makeText(this, "Micro refusé : autorisez-le dans les réglages de l'app", Toast.LENGTH_LONG).show()
             voice = false; mic.setTextColor(Color.WHITE); if (muted) muteBeep(false); return
         }
-        // Pack hors ligne absent / langue indisponible hors ligne : on repasse en ligne
-        if (offline && (e == SpeechRecognizer.ERROR_NETWORK || e == SpeechRecognizer.ERROR_SERVER || e == 12 || e == 13)) offline = false
+        // En ligne par défaut : la reconnaissance hors ligne de Google ne gère qu'une écoute à la fois
+        // et répond « trop de demandes » (10) si une autre appli l'utilise déjà (ex. pendant le live).
+        // 10 / langue indisponible hors ligne → en ligne ; pas de réseau → on tente le hors ligne.
+        if (offline && (e == 10 || e == 12 || e == 13)) offline = false
+        else if (!offline && (e == SpeechRecognizer.ERROR_NETWORK || e == SpeechRecognizer.ERROR_NETWORK_TIMEOUT || e == SpeechRecognizer.ERROR_SERVER)) offline = true
         errs++
         // 10 = trop de demandes : on patiente 3 s avec le même moteur. 5/8/11 = moteur cassé : moteur neuf.
         val delay = when (e) {
-            10 -> 3000L
+            10 -> 1500L
             SpeechRecognizer.ERROR_CLIENT, SpeechRecognizer.ERROR_RECOGNIZER_BUSY, 11 -> { needFresh = true; 1500L }
             else -> min(3000L, 500L + errs * 300L)
         }
