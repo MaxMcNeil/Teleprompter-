@@ -653,7 +653,14 @@ class OverlayService : Service(), RecognitionListener {
     override fun onEndOfSpeech() {}
     override fun onEvent(t: Int, b: Bundle?) {}
     override fun onError(e: Int) {
-        lastEvt = SystemClock.uptimeMillis(); lastErr = e
+        lastEvt = SystemClock.uptimeMillis()
+        // Silence (même 30 s ou plus) : Google s'arrête faute de parole. Ce n'est pas une panne :
+        // on relance tout de suite, sans compter d'erreur ni ralentir. Le texte reste immobile.
+        if (e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || e == SpeechRecognizer.ERROR_NO_MATCH) {
+            if (voice) { h.removeCallbacks(relaunch); h.postDelayed(relaunch, 100) }
+            return
+        }
+        lastErr = e
         if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             Toast.makeText(this, "Micro refusé : autorisez-le dans les réglages de l'app", Toast.LENGTH_LONG).show()
             voice = false; mic.setTextColor(Color.WHITE); if (muted) muteBeep(false); return
@@ -664,7 +671,7 @@ class OverlayService : Service(), RecognitionListener {
         errs++
         if (errs >= 15 && !warnedG) {
             warnedG = true
-            Toast.makeText(this, "La reconnaissance Google répond mal (réseau ?). Le défilement continue.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "La reconnaissance Google répond mal (réseau ?). Le suivi reprendra dès qu'elle répond.", Toast.LENGTH_LONG).show()
         }
         restart()
     }
