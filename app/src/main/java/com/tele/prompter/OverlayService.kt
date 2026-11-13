@@ -62,6 +62,10 @@ class OverlayService : Service(), RecognitionListener {
     private var google = false
     private var offline = true
     private var warnedG = false
+    @Volatile private var lastEvt = 0L
+    private var lastText = 0L
+    private var starts = 0
+    private var lastErr = 0
     private var alarmOn = false
     @Volatile private var mySess = -1
     private var orient: OrientationEventListener? = null
@@ -358,7 +362,9 @@ class OverlayService : Service(), RecognitionListener {
                 val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
                 val cut = others.count { it.isClientSilenced }
                 val moi = when { google && voice -> "Google"; me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
-                diag.text = "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
+                diag.text = if (google && voice) "🎙 Google : écoute · relances $starts" + (if (lastErr > 0) " · err $lastErr" else "") +
+                    "\nAutres applis : ${others.size} · coupées : $cut"
+                else "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
             } catch (_: Exception) { diag.text = "🎙 diagnostic indisponible" }
             val bad = try {
@@ -374,6 +380,13 @@ class OverlayService : Service(), RecognitionListener {
                 if (bad) try {
                     getSystemService(Vibrator::class.java)?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 200, 400, 200, 400), -1))
                 } catch (_: Exception) {}
+            }
+            // Chien de garde Google : moteur muet depuis 5 s, ou aucun mot reconnu depuis 15 s → moteur neuf
+            if (google && voice) {
+                val now = SystemClock.uptimeMillis()
+                if (now - lastEvt > 5000 || now - lastText > 15000) {
+                    lastText = now; listen()
+                }
             }
             h.postDelayed(this, 1000)
         }
@@ -446,7 +459,7 @@ class OverlayService : Service(), RecognitionListener {
                 Toast.makeText(this, "Reconnaissance vocale Google absente du téléphone : choisissez Vosk", Toast.LENGTH_LONG).show()
                 voice = false; mic.setTextColor(Color.WHITE); return
             }
-            errs = 0; warnedG = false; muteBeep(true); listen(); return
+            errs = 0; warnedG = false; starts = 0; lastErr = 0; lastText = SystemClock.uptimeMillis(); muteBeep(true); listen(); return
         }
         if (model != null) { startVosk(); return }
         val expect = lang.startsWith("fr") || (lang.startsWith("ar") && File(filesDir, "models/ar.ok").exists())
@@ -543,10 +556,16 @@ class OverlayService : Service(), RecognitionListener {
         try { val t = JSONObject(j).optString(key); if (t.isNotEmpty()) onHeard(t, key == "text") else if (key == "text") uttBase = -1 } catch (_: Exception) {}
     }
 
+    // Chaque écoute repart d'un moteur Google NEUF : certains téléphones refusent de relancer
+    // le même moteur après la première phrase (le suivi s'arrêtait après une phrase).
     private fun listen() {
         if (!voice) return
-        if (sr == null) sr = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
+        h.removeCallbacks(relaunch)
+        try { sr?.destroy() } catch (_: Exception) {}
+        sr = null
+        lastEvt = SystemClock.uptimeMillis(); starts++
         try {
+            sr = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
             sr!!.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
@@ -556,8 +575,7 @@ class OverlayService : Service(), RecognitionListener {
                 .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, offline)
                 // Attendre plus longtemps avant de couper la phrase (Google ne le respecte pas toujours)
                 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
-                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
-                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15000L))
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L))
         } catch (e: Exception) { errs++; restart() }
     }
 
@@ -625,13 +643,17 @@ class OverlayService : Service(), RecognitionListener {
         if (fin) uttBase = -1
     }
 
-    override fun onReadyForSpeech(p: Bundle?) {}
-    override fun onBeginningOfSpeech() {}
-    override fun onRmsChanged(r: Float) {}
+    override fun onReadyForSpeech(p: Bundle?) { lastEvt = SystemClock.uptimeMillis() }
+    override fun onBeginningOfSpeech() { lastEvt = SystemClock.uptimeMillis() }
+    override fun onRmsChanged(r: Float) {
+        lastEvt = SystemClock.uptimeMillis()
+        if (voice && google) mic.text = "🎤" + "▁▃▅▇█"[((r + 2f) / 3f).toInt().coerceIn(0, 4)]
+    }
     override fun onBufferReceived(b: ByteArray?) {}
     override fun onEndOfSpeech() {}
     override fun onEvent(t: Int, b: Bundle?) {}
     override fun onError(e: Int) {
+        lastEvt = SystemClock.uptimeMillis(); lastErr = e
         if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             Toast.makeText(this, "Micro refusé : autorisez-le dans les réglages de l'app", Toast.LENGTH_LONG).show()
             voice = false; mic.setTextColor(Color.WHITE); if (muted) muteBeep(false); return
@@ -646,8 +668,8 @@ class OverlayService : Service(), RecognitionListener {
         }
         restart()
     }
-    override fun onPartialResults(b: Bundle?) = heard(b, false)
-    override fun onResults(b: Bundle?) { heard(b, true); restart() }
+    override fun onPartialResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, false) }
+    override fun onResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, true); restart() }
 
     override fun onDestroy() {
         if (muted) muteBeep(false)

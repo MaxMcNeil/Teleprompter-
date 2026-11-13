@@ -9,8 +9,8 @@ android {
         applicationId = "com.tele.prompteur"
         minSdk = 29
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.6"
+        versionCode = 8
+        versionName = "1.7"
     }
     // Clé fixe : chaque nouvel APK s'installe par-dessus l'ancien (sinon « paquet non valide »)
     signingConfigs {
