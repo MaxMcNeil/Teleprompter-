@@ -67,6 +67,9 @@ class OverlayService : Service(), RecognitionListener {
     @Volatile private var lastEvt = 0L
     private var lastText = 0L
     private var starts = 0
+    private var creates = 0
+    private var lastCreate = 0L
+    private var needFresh = false
     private var lastErr = 0
     private var alarmOn = false
     @Volatile private var mySess = -1
@@ -369,7 +372,7 @@ class OverlayService : Service(), RecognitionListener {
                 val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
                 val cut = others.count { it.isClientSilenced }
                 val moi = when { google && voice -> "Google"; me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
-                diag.text = if (google && voice) "🎙 Google : écoute · relances $starts" +
+                diag.text = if (google && voice) "🎙 Google : écoute · relances $starts · moteurs $creates" +
                     "\nAutres applis : ${others.size} · coupées : $cut"
                 else "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
@@ -392,12 +395,11 @@ class OverlayService : Service(), RecognitionListener {
             val showErr = google && voice && lastErr > 0 && SystemClock.uptimeMillis() - lastErrAt < 10000
             gerr.visibility = if (showErr) View.VISIBLE else View.GONE
             if (showErr) gerr.text = "⚠ Erreur $lastErr : " + errText(lastErr)
-            // Chien de garde Google : moteur muet depuis 5 s, ou aucun mot reconnu depuis 15 s → moteur neuf
+            // Chien de garde Google : aucun signe de vie depuis 8 s (pas même un niveau de micro) → moteur neuf
+            // (au plus une fois toutes les 10 s). Un long silence de ta part n'est PAS un blocage.
             if (google && voice) {
                 val now = SystemClock.uptimeMillis()
-                if (now - lastEvt > 5000 || now - lastText > 15000) {
-                    lastText = now; listen()
-                }
+                if (now - lastEvt > 8000) listen(true)
             }
             h.postDelayed(this, 1000)
         }
@@ -470,7 +472,7 @@ class OverlayService : Service(), RecognitionListener {
                 Toast.makeText(this, "Reconnaissance vocale Google absente du téléphone : choisissez Vosk", Toast.LENGTH_LONG).show()
                 voice = false; mic.setTextColor(Color.WHITE); return
             }
-            errs = 0; warnedG = false; starts = 0; lastErr = 0; lastText = SystemClock.uptimeMillis(); muteBeep(true); listen(); return
+            errs = 0; warnedG = false; starts = 0; creates = 0; needFresh = false; lastErr = 0; lastText = SystemClock.uptimeMillis(); muteBeep(true); listen(); return
         }
         if (model != null) { startVosk(); return }
         val expect = lang.startsWith("fr") || (lang.startsWith("ar") && File(filesDir, "models/ar.ok").exists())
@@ -569,14 +571,20 @@ class OverlayService : Service(), RecognitionListener {
 
     // Chaque écoute repart d'un moteur Google NEUF : certains téléphones refusent de relancer
     // le même moteur après la première phrase (le suivi s'arrêtait après une phrase).
-    private fun listen() {
+    // On garde le MÊME moteur Google et on le relance. On n'en crée un neuf que s'il est cassé
+    // (erreurs 5/8/11 ou plus aucun signe de vie), et jamais plus d'une fois toutes les 10 s :
+    // en créer trop provoque l'erreur 10 « trop de demandes ».
+    private fun listen(fresh: Boolean = false) {
         if (!voice) return
         h.removeCallbacks(relaunch)
-        try { sr?.destroy() } catch (_: Exception) {}
-        sr = null
-        lastEvt = SystemClock.uptimeMillis(); starts++
+        val now = SystemClock.uptimeMillis()
+        lastEvt = now; starts++
         try {
-            sr = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
+            if (sr == null || (fresh && now - lastCreate > 10000)) {
+                try { sr?.destroy() } catch (_: Exception) {}
+                sr = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
+                lastCreate = now; creates++
+            } else try { sr?.cancel() } catch (_: Exception) {}
             sr!!.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
@@ -587,15 +595,15 @@ class OverlayService : Service(), RecognitionListener {
                 // Attendre plus longtemps avant de couper la phrase (Google ne le respecte pas toujours)
                 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
                 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L))
-        } catch (e: Exception) { errs++; restart() }
+        } catch (e: Exception) { errs++; needFresh = true; restart(1500) }
     }
 
     // Relance rapide (jamais plus d'une seconde), une seule relance en attente à la fois
-    private val relaunch = Runnable { if (voice) listen() }
-    private fun restart() {
+    private val relaunch = Runnable { if (voice) { val f = needFresh; needFresh = false; listen(f) } }
+    private fun restart(delay: Long = 300) {
         if (!voice) return
         h.removeCallbacks(relaunch)
-        h.postDelayed(relaunch, min(1000L, 100L + errs * 150L))
+        h.postDelayed(relaunch, delay)
     }
 
     private fun heard(b: Bundle?, fin: Boolean) {
@@ -668,7 +676,7 @@ class OverlayService : Service(), RecognitionListener {
         // Silence (même 30 s ou plus) : Google s'arrête faute de parole. Ce n'est pas une panne :
         // on relance tout de suite, sans compter d'erreur ni ralentir. Le texte reste immobile.
         if (e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || e == SpeechRecognizer.ERROR_NO_MATCH) {
-            if (voice) { h.removeCallbacks(relaunch); h.postDelayed(relaunch, 100) }
+            restart(300)
             return
         }
         lastErr = e; lastErrAt = SystemClock.uptimeMillis()
@@ -678,13 +686,18 @@ class OverlayService : Service(), RecognitionListener {
         }
         // Pack hors ligne absent / langue indisponible hors ligne : on repasse en ligne
         if (offline && (e == SpeechRecognizer.ERROR_NETWORK || e == SpeechRecognizer.ERROR_SERVER || e == 12 || e == 13)) offline = false
-        if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || e == SpeechRecognizer.ERROR_CLIENT) try { sr?.cancel() } catch (_: Exception) {}
         errs++
+        // 10 = trop de demandes : on patiente 3 s avec le même moteur. 5/8/11 = moteur cassé : moteur neuf.
+        val delay = when (e) {
+            10 -> 3000L
+            SpeechRecognizer.ERROR_CLIENT, SpeechRecognizer.ERROR_RECOGNIZER_BUSY, 11 -> { needFresh = true; 1500L }
+            else -> min(3000L, 500L + errs * 300L)
+        }
         if (errs >= 15 && !warnedG) {
             warnedG = true
             Toast.makeText(this, "La reconnaissance Google répond mal (réseau ?). Le suivi reprendra dès qu'elle répond.", Toast.LENGTH_LONG).show()
         }
-        restart()
+        restart(delay)
     }
     private fun errText(e: Int) = when (e) {
         1 -> "réseau trop lent"
@@ -701,7 +714,7 @@ class OverlayService : Service(), RecognitionListener {
     }
 
     override fun onPartialResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, false) }
-    override fun onResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, true); restart() }
+    override fun onResults(b: Bundle?) { lastEvt = SystemClock.uptimeMillis(); lastText = lastEvt; heard(b, true); restart(250) }
 
     override fun onDestroy() {
         if (muted) muteBeep(false)
