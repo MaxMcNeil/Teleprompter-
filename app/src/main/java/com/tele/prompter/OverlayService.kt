@@ -62,6 +62,7 @@ class OverlayService : Service(), RecognitionListener {
     private lateinit var holder: FrameLayout
     private lateinit var alarm: TextView
     private lateinit var diag: TextView
+    private var micKhz = 0
     private var alarmOn = false
     @Volatile private var mySess = -1
     private var orient: OrientationEventListener? = null
@@ -353,7 +354,7 @@ class OverlayService : Service(), RecognitionListener {
                 val me = cs.firstOrNull { mySess != -1 && it.clientAudioSessionId == mySess }
                 val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
                 val cut = others.count { it.isClientSilenced }
-                val moi = when { me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok" }
+                val moi = when { me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok · $micKhz kHz" }
                 diag.text = "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
             } catch (_: Exception) { diag.text = "🎙 diagnostic indisponible" }
@@ -471,6 +472,10 @@ class OverlayService : Service(), RecognitionListener {
         val rate = if (a48 != null) 48000 else 16000
         val ar = a48 ?: open(16000)
         val f = rate / 16000
+        if (ar != null) {
+            micKhz = rate / 1000
+            if (rate != 48000) Toast.makeText(this, "⚠ Le téléphone refuse le 48 kHz : micro en 16 kHz (qualité téléphone)", Toast.LENGTH_LONG).show()
+        }
         if (ar != null) mySess = ar.audioSessionId
         if (ar == null || ar.state != AudioRecord.STATE_INITIALIZED) {
             Toast.makeText(this, "Micro indisponible (essayez une autre source micro)", Toast.LENGTH_LONG).show()
