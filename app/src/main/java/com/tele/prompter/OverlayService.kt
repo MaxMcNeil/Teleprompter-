@@ -75,6 +75,7 @@ class OverlayService : Service(), RecognitionListener {
     private var rx = 0
     private var ry = 0
     companion object {
+        @Volatile var inst: OverlayService? = null
         @Volatile var frModel: Model? = null
         @Volatile var arModel: Model? = null
     }
@@ -260,6 +261,7 @@ class OverlayService : Service(), RecognitionListener {
             Toast.makeText(this, "Fenêtre impossible : autorisez « Afficher par-dessus les autres applis »", Toast.LENGTH_LONG).show()
             stopSelf(); return START_NOT_STICKY
         }
+        inst = this
         try { orient?.disable() } catch (_: Exception) {}
         orient = object : OrientationEventListener(this) {
             override fun onOrientationChanged(o: Int) {
@@ -676,7 +678,19 @@ class OverlayService : Service(), RecognitionListener {
     override fun onPartialResults(b: Bundle?) = heard(b, false)
     override fun onResults(b: Bundle?) { heard(b, true); restart() }
 
+    // Protection live YouTube : quand l'écran de création de live s'ouvre, on coupe 🎤 pour que
+    // Prompteur ne tienne jamais le micro au moment où YouTube démarre le live.
+    fun ytLive() {
+        if (!voice) return
+        toggleVoice()
+        Toast.makeText(this, "🎤 coupé : YouTube prépare le live. Rallume 🎤 une fois le live lancé.", Toast.LENGTH_LONG).show()
+        try {
+            getSystemService(Vibrator::class.java)?.vibrate(VibrationEffect.createOneShot(250, VibrationEffect.DEFAULT_AMPLITUDE))
+        } catch (_: Exception) {}
+    }
+
     override fun onDestroy() {
+        if (inst === this) inst = null
         if (muted) muteBeep(false)
         stopVosk()
         voice = false; auto = false
