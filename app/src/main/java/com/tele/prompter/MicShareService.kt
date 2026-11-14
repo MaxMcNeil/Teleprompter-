@@ -7,8 +7,12 @@ import android.view.accessibility.AccessibilityEvent
 // Service d'accessibilité : donne à l'app la priorité micro (partagé avec la caméra) et repère
 // l'ouverture de l'écran de live YouTube pour couper 🎤 à ce moment-là (une seule fois par live).
 class MicShareService : AccessibilityService() {
-    companion object { @Volatile var up = false; @Volatile var lastYt = "" }
-    private var inLive = false
+    companion object {
+        @Volatile var up = false
+        @Volatile var lastYt = ""
+        @Volatile var ytEvents = 0
+        @Volatile var inLive = false
+    }
 
     override fun onServiceConnected() { up = true }
     override fun onUnbind(intent: Intent?): Boolean { up = false; return super.onUnbind(intent) }
@@ -18,7 +22,7 @@ class MicShareService : AccessibilityService() {
         val pkg = e.packageName?.toString() ?: return
         val cls = e.className?.toString() ?: ""
         if (pkg == "com.google.android.youtube") {
-            lastYt = cls.substringAfterLast('.')
+            lastYt = cls.substringAfterLast('.'); ytEvents++
             // Écran de création / diffusion du live (LiveCreationActivity)
             if (!inLive && cls.contains("live", ignoreCase = true)) {
                 inLive = true

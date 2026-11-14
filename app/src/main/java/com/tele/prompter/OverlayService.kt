@@ -181,11 +181,7 @@ class OverlayService : Service(), RecognitionListener {
                 root.setBackgroundColor((alphas[ai] shl 24) or 0x600000)
                 Toast.makeText(this@OverlayService, "Opacité du fond : ${alphas[ai] * 100 / 255} %", Toast.LENGTH_SHORT).show()
             })
-            diag = TextView(this@OverlayService).apply {
-                setTextColor(Color.WHITE); textSize = 12f; gravity = Gravity.CENTER; maxLines = 2
-                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-            }
-            addView(diag)
+            addView(View(this@OverlayService).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
             addView(grip)
         }
         root = LinearLayout(this).apply {
@@ -197,7 +193,13 @@ class OverlayService : Service(), RecognitionListener {
                 setPadding(0, (8 * dp).toInt(), 0, (8 * dp).toInt())
                 setOnClickListener { if (voice) toggleVoice() }
             }
-            addView(alarm); addView(sv); addView(foot)
+            // Diagnostic sur sa propre ligne, toute la largeur (rien de coupé)
+            diag = TextView(this@OverlayService).apply {
+                setTextColor(Color.WHITE); textSize = 12f; gravity = Gravity.CENTER
+                setPadding((6 * dp).toInt(), (2 * dp).toInt(), (6 * dp).toInt(), 0)
+                layoutParams = LinearLayout.LayoutParams(-1, -2)
+            }
+            addView(alarm); addView(sv); addView(diag); addView(foot)
         }
         lp = WindowManager.LayoutParams(
             100, 100,
@@ -359,8 +361,9 @@ class OverlayService : Service(), RecognitionListener {
                 val moi = when { me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok · $micKhz kHz" }
                 val acc = if (MicShareService.up) "active" else "ARRÊTÉE"
                 val yt = MicShareService.lastYt.ifEmpty { "—" }
-                diag.text = "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut\nAccessibilité : $acc · YT : $yt"
-                diag.maxLines = 3
+                val prot = if (MicShareService.inLive) "déclenchée" else "armée"
+                diag.text = "🎙 Prompteur : $moi · Autres applis : ${others.size} · coupées : $cut\n" +
+                    "Accessibilité : $acc · YT : $yt (${MicShareService.ytEvents}) · protection : $prot"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0 || !MicShareService.up) 0xFFFF5252.toInt() else Color.WHITE)
             } catch (_: Exception) { diag.text = "🎙 diagnostic indisponible" }
             val bad = try {
