@@ -63,6 +63,8 @@ class OverlayService : Service(), RecognitionListener {
     private lateinit var alarm: TextView
     private lateinit var diag: TextView
     private var micKhz = 0
+    private var prot = ""
+    private var voiceOnAt = 0L
     private var alarmOn = false
     @Volatile private var mySess = -1
     private var orient: OrientationEventListener? = null
@@ -361,9 +363,8 @@ class OverlayService : Service(), RecognitionListener {
                 val moi = when { me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok · $micKhz kHz" }
                 val acc = if (MicShareService.up) "active" else "ARRÊTÉE"
                 val yt = MicShareService.lastYt.ifEmpty { "—" }
-                val prot = if (MicShareService.inLive) "déclenchée" else "armée"
                 diag.text = "🎙 Prompteur : $moi · Autres applis : ${others.size} · coupées : $cut\n" +
-                    "Accessibilité : $acc · YT : $yt (${MicShareService.ytEvents}) · protection : $prot"
+                    "Accessibilité : $acc · YT : $yt (${MicShareService.ytEvents}) · protection : ${prot.ifEmpty { "armée" }}"
                 diag.setTextColor(if (me?.isClientSilenced == true || cut > 0 || !MicShareService.up) 0xFFFF5252.toInt() else Color.WHITE)
             } catch (_: Exception) { diag.text = "🎙 diagnostic indisponible" }
             val bad = try {
@@ -442,7 +443,7 @@ class OverlayService : Service(), RecognitionListener {
         voice = !voice
         mic.setTextColor(if (voice) 0xFFFFEB3B.toInt() else Color.WHITE)
         if (!voice) { mic.text = "🎤"; sr?.cancel(); stopVosk(); if (muted) muteBeep(false); return }
-        auto = false; play.text = "▶"
+        auto = false; play.text = "▶"; voiceOnAt = SystemClock.uptimeMillis()
         pace = 0f; lastProg = 0L; uttBase = -1; stuckUtt = 0; acc = 0f
         anchor = sv.scrollY; h.removeCallbacks(scroller); h.post(scroller)
         if (model != null) { startVosk(); return }
@@ -686,9 +687,11 @@ class OverlayService : Service(), RecognitionListener {
 
     // Protection live YouTube : quand l'écran de création de live s'ouvre, on coupe 🎤 pour que
     // Prompteur ne tienne jamais le micro au moment où YouTube démarre le live.
-    fun ytLive() {
-        if (!voice) return
+    fun ytLive(session: Long) {
+        if (!voice) { if (prot.isEmpty() || prot.startsWith("armée")) prot = "🎤 était éteint"; return }
+        if (voiceOnAt >= session) return            // 🎤 allumé pendant le live : on n'y touche pas
         toggleVoice()
+        prot = "🎤 coupé à " + java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.FRANCE).format(java.util.Date())
         Toast.makeText(this, "🎤 coupé : YouTube prépare le live. Rallume 🎤 une fois le live lancé.", Toast.LENGTH_LONG).show()
         try {
             getSystemService(Vibrator::class.java)?.vibrate(VibrationEffect.createOneShot(250, VibrationEffect.DEFAULT_AMPLITUDE))
