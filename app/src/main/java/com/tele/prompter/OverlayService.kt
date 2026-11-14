@@ -357,8 +357,11 @@ class OverlayService : Service(), RecognitionListener {
                 val others = cs.filter { mySess == -1 || it.clientAudioSessionId != mySess }
                 val cut = others.count { it.isClientSilenced }
                 val moi = when { me == null -> "off"; me.isClientSilenced -> "COUPÉ"; else -> "ok · $micKhz kHz" }
-                diag.text = "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut"
-                diag.setTextColor(if (me?.isClientSilenced == true || cut > 0) 0xFFFF5252.toInt() else Color.WHITE)
+                val acc = if (MicShareService.up) "active" else "ARRÊTÉE"
+                val yt = MicShareService.lastYt.ifEmpty { "—" }
+                diag.text = "🎙 Prompteur : $moi\nAutres applis : ${others.size} · coupées : $cut\nAccessibilité : $acc · YT : $yt"
+                diag.maxLines = 3
+                diag.setTextColor(if (me?.isClientSilenced == true || cut > 0 || !MicShareService.up) 0xFFFF5252.toInt() else Color.WHITE)
             } catch (_: Exception) { diag.text = "🎙 diagnostic indisponible" }
             val bad = try {
                 getSystemService(AudioManager::class.java).activeRecordingConfigurations.any {
