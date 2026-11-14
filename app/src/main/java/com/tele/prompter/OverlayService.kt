@@ -453,18 +453,24 @@ class OverlayService : Service(), RecognitionListener {
     private fun startVosk() {
         val my = ++sess
         // Toujours « reconnaissance vocale » : la seule source qu'Android partage entre le service
-        // d'accessibilité et l'appli au premier plan (YouTube garde alors son son)
+        // d'accessibilité et l'appli au premier plan.
+        // Capture en 48 kHz (qualité studio) pour ne pas tirer le micro partagé vers la qualité
+        // « téléphone » (16 kHz), ce qui peut dégrader le son de YouTube. Prompteur réduit lui-même
+        // à 16 kHz pour la reconnaissance. Si le téléphone refuse le 48 kHz, on repasse en 16 kHz.
         val src = MediaRecorder.AudioSource.VOICE_RECOGNITION
-        val rate = 16000
-        val f = rate / 16000
-        val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val ar = try {
-            val fmt = AudioFormat.Builder().setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+        fun open(r: Int): AudioRecord? = try {
+            val minBuf = AudioRecord.getMinBufferSize(r, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val fmt = AudioFormat.Builder().setSampleRate(r).setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT).build()
-            val bld = AudioRecord.Builder().setAudioSource(src).setAudioFormat(fmt).setBufferSizeInBytes(max(minBuf, rate))
+            val bld = AudioRecord.Builder().setAudioSource(src).setAudioFormat(fmt).setBufferSizeInBytes(max(minBuf, r))
             if (Build.VERSION.SDK_INT >= 30) bld.setPrivacySensitive(false)
-            bld.build()
+            val a = bld.build()
+            if (a.state == AudioRecord.STATE_INITIALIZED) a else { a.release(); null }
         } catch (e: Exception) { null }
+        val a48 = open(48000)
+        val rate = if (a48 != null) 48000 else 16000
+        val ar = a48 ?: open(16000)
+        val f = rate / 16000
         if (ar != null) mySess = ar.audioSessionId
         if (ar == null || ar.state != AudioRecord.STATE_INITIALIZED) {
             Toast.makeText(this, "Micro indisponible (essayez une autre source micro)", Toast.LENGTH_LONG).show()
