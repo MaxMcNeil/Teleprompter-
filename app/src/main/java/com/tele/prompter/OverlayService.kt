@@ -83,6 +83,11 @@ class OverlayService : Service(), RecognitionListener {
     }
     private var muted = false
     private var modelFailed = false
+    // War Room : repères « ▶ … » du script (mot où commence la partie, écran OBS à afficher) et pilotage d'OBS
+    private val markers = ArrayList<Pair<Int, String>>()
+    private var obs: ObsLink? = null
+    private var curSeg = -1
+    private lateinit var obsTv: TextView
     private val hl = BackgroundColorSpan(0xFF1E88E5.toInt())
     private var ai = 1
     private val alphas = intArrayOf(0x30, 0x50, 0x80, 0xB0, 0xF0)
@@ -127,7 +132,23 @@ class OverlayService : Service(), RecognitionListener {
         if (p.getBoolean("muted", false)) muteBeep(false)
         val text = (p.getString("text", "") ?: "").take(500_000)
         lang = p.getString("lang", "fr-FR") ?: "fr-FR"
-        Regex("[^\\s'’\\-–—]+").findAll(text).forEach { val w = norm(it.value); if (w.isNotEmpty()) { words.add(w); st.add(it.range.first); en.add(it.range.last + 1) } }
+        // Les lignes repères « ▶ DOSSIER 3/12 · … » restent affichées mais ne se lisent pas : leurs mots ne sont pas suivis
+        val marks = Regex("(?m)^[ \\t]*▶[^\\n]*").findAll(text).toList()
+        var mi = 0
+        Regex("[^\\s'’\\-–—]+").findAll(text).forEach {
+            while (mi < marks.size && marks[mi].range.last < it.range.first) mi++
+            if (mi < marks.size && it.range.first >= marks[mi].range.first) return@forEach
+            val w = norm(it.value); if (w.isNotEmpty()) { words.add(w); st.add(it.range.first); en.add(it.range.last + 1) }
+        }
+        for (m in marks) {
+            val l = m.value.uppercase()
+            val clip = when {
+                l.contains("OUVERTURE") -> "wr-00.mp4"
+                l.contains("CLÔTURE") || l.contains("CLOTURE") -> "wr-fin.mp4"
+                else -> Regex("DOSSIER\\s+(\\d+)").find(l)?.let { String.format(java.util.Locale.ROOT, "wr-%02d.mp4", it.groupValues[1].toInt()) }
+            } ?: continue
+            markers.add(Pair(st.count { it < m.range.first }, clip))
+        }
         if (words.isEmpty()) { Toast.makeText(this, "Texte vide", Toast.LENGTH_SHORT).show(); stopSelf(); return START_NOT_STICKY }
 
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -183,7 +204,14 @@ class OverlayService : Service(), RecognitionListener {
                 root.setBackgroundColor((alphas[ai] shl 24) or 0x600000)
                 Toast.makeText(this@OverlayService, "Opacité du fond : ${alphas[ai] * 100 / 255} %", Toast.LENGTH_SHORT).show()
             })
-            addView(View(this@OverlayService).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
+            val war = p.getBoolean("obs_on", false) && markers.isNotEmpty()
+            if (war) { addView(arrow("⏮") { jump(-1) }); addView(arrow("⏭") { jump(1) }) }
+            obsTv = TextView(this@OverlayService).apply {
+                textSize = 11f; setTextColor(Color.WHITE); maxLines = 2; visibility = if (war) View.VISIBLE else View.GONE
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            }
+            addView(obsTv)
+            if (!war) addView(View(this@OverlayService).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
             addView(grip)
         }
         root = LinearLayout(this).apply {
@@ -267,6 +295,13 @@ class OverlayService : Service(), RecognitionListener {
             stopSelf(); return START_NOT_STICKY
         }
         inst = this
+        if (p.getBoolean("obs_on", false) && markers.isNotEmpty()) {
+            curSeg = -1
+            obs = ObsLink(p.getString("obs_ip", "") ?: "", p.getInt("obs_port", 4455), p.getString("obs_pw", "") ?: "",
+                p.getString("obs_dir", "") ?: "") { s, ok -> obsTv.text = s; obsTv.setTextColor(if (ok) 0xFF69F0AE.toInt() else 0xFFFFAB40.toInt()) }
+                .also { it.start() }
+            obsSync()
+        }
         try { orient?.disable() } catch (_: Exception) {}
         orient = object : OrientationEventListener(this) {
             override fun onOrientationChanged(o: Int) {
@@ -394,6 +429,27 @@ class OverlayService : Service(), RecognitionListener {
         try { orient?.disable() } catch (_: Exception) {}
         try { wm.removeView(holder) } catch (_: Exception) {}
         words.clear(); st.clear(); en.clear(); pos = 0; pending = -1; anchor = 0
+        obs?.stop(); obs = null; markers.clear(); curSeg = -1
+    }
+
+    // War Room : l'écran OBS suit la partie du script où l'on est (avance = transition ALERTE ; retour = sans alerte)
+    private fun obsSync() {
+        val o = obs ?: return
+        if (markers.isEmpty()) return
+        val k = max(0, markers.indexOfLast { it.first <= pos })
+        if (k == curSeg) return
+        val alerte = curSeg >= 0 && k > curSeg && markers[k].second != "wr-00.mp4"
+        curSeg = k
+        o.show(markers[k].second, alerte)
+    }
+
+    // Secours manuel : partie précédente / suivante (texte ET écran OBS)
+    private fun jump(d: Int) {
+        if (markers.isEmpty()) return
+        val k = max(0, markers.indexOfLast { it.first <= pos })
+        val t = (k + d).coerceIn(0, markers.size - 1)
+        pending = -1; uttBase = -1; stuckUtt = 0
+        pos = markers[t].first; show()
     }
 
     // Début de la phrase qui contient le mot p (15 mots maximum en arrière)
@@ -411,6 +467,7 @@ class OverlayService : Service(), RecognitionListener {
     private fun show() {
         val n = words.size
         if (n == 0) return
+        obsSync()
         val a = min(pos, n - 1)
         val sp = tv.text as Spannable
         if (pos <= 0) sp.removeSpan(hl) else {
@@ -701,6 +758,7 @@ class OverlayService : Service(), RecognitionListener {
 
     override fun onDestroy() {
         if (inst === this) inst = null
+        obs?.stop(); obs = null
         if (muted) muteBeep(false)
         stopVosk()
         voice = false; auto = false

@@ -9,8 +9,8 @@ android {
         applicationId = "com.tele.prompteur"
         minSdk = 29
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.19"
+        versionCode = 21
+        versionName = "1.20"
     }
     // Clé fixe : chaque nouvel APK s'installe par-dessus l'ancien (sinon « paquet non valide »)
     signingConfigs {
@@ -34,4 +34,5 @@ android {
 dependencies {
     implementation("net.java.dev.jna:jna:5.13.0@aar")
     implementation("com.alphacephei:vosk-android:0.3.47")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")   // pilotage d'OBS (WebSocket, War Room)
 }

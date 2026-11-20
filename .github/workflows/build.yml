@@ -25,7 +25,13 @@ jobs:
           mv vosk-model-small-fr-0.22 app/src/main/assets/model-fr
           cat /proc/sys/kernel/random/uuid > app/src/main/assets/model-fr/uuid
       - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        if: github.ref != 'refs/heads/main'
+        with:
+          name: prompteur-essai
+          path: app/build/outputs/apk/debug/*.apk
       - uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
         with:
           tag_name: latest
           name: Prompteur (dernier APK)

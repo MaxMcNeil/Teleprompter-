@@ -31,6 +31,7 @@ class MainActivity : Activity() {
     private lateinit var sp2: Spinner
     private lateinit var histBtn: Button
     private lateinit var histBox: LinearLayout
+    private lateinit var obsBtn: Button
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -78,11 +79,50 @@ class MainActivity : Activity() {
         }
         refreshHist()
         acc = Button(this).apply { setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } }
+        obsBtn = Button(this).apply { isAllCaps = false; setOnClickListener { obsDialog() } }
+        refreshObs()
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(32, 32, 32, 32); fitsSystemWindows = true
             addView(TextView(context).apply { text = "Langue de la voix :" })
-            addView(sp); sp2.visibility = View.GONE; addView(sp2); addView(dl); addView(imp); addView(histBtn); addView(histBox); addView(et); addView(acc); addView(btn)
+            addView(sp); sp2.visibility = View.GONE; addView(sp2); addView(dl); addView(imp); addView(histBtn); addView(histBox); addView(et); addView(acc); addView(obsBtn); addView(btn)
         })
+    }
+
+    // ---------- War Room : pilotage d'OBS (facultatif, désactivé par défaut) ----------
+    private fun refreshObs() {
+        val p = getSharedPreferences("t", 0)
+        obsBtn.text = if (p.getBoolean("obs_on", false)) "🎛 Piloter OBS (War Room) : ACTIVÉ · ${p.getString("obs_ip", "")}" else "🎛 Piloter OBS (War Room) : désactivé"
+    }
+
+    private fun obsDialog() {
+        val p = getSharedPreferences("t", 0)
+        fun field(h: String, v: String, num: Boolean = false, pw: Boolean = false) = EditText(this).apply {
+            hint = h; setText(v); isSingleLine = true
+            inputType = when {
+                num -> android.text.InputType.TYPE_CLASS_NUMBER
+                pw -> android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                else -> android.text.InputType.TYPE_CLASS_TEXT
+            }
+        }
+        val on = Switch(this).apply { text = "Changer l'écran d'OBS à chaque « ▶ DOSSIER » lu"; isChecked = p.getBoolean("obs_on", false) }
+        val ip = field("Adresse IP du PC (ex. 192.168.1.20)", p.getString("obs_ip", "") ?: "")
+        val port = field("Port (4455)", p.getInt("obs_port", 4455).toString(), num = true)
+        val pw = field("Mot de passe du serveur WebSocket d'OBS", p.getString("obs_pw", "") ?: "", pw = true)
+        val dir = field("Dossier des écrans sur le PC (ex. C:\\WarRoom)", p.getString("obs_dir", "") ?: "")
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(48, 24, 48, 0)
+            addView(on)
+            addView(TextView(context).apply { text = "OBS : Outils → Paramètres du serveur WebSocket (activer, noter l'IP, le port et le mot de passe). Dans la scène : une source média nommée « WarRoom » et une nommée « WarRoom-Alerte ». Le téléphone et le PC doivent être sur le même Wi-Fi." })
+            addView(ip); addView(port); addView(pw); addView(dir)
+        }
+        AlertDialog.Builder(this).setTitle("War Room → OBS").setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Enregistrer") { _, _ ->
+                p.edit().putBoolean("obs_on", on.isChecked).putString("obs_ip", ip.text.toString().trim())
+                    .putInt("obs_port", port.text.toString().trim().toIntOrNull() ?: 4455)
+                    .putString("obs_pw", pw.text.toString()).putString("obs_dir", dir.text.toString().trim()).apply()
+                refreshObs()
+            }
+            .setNegativeButton("Annuler", null).show()
     }
 
     // Sauvegarde le texte en cours (sinon perdu en tournant le téléphone avant de lancer)
