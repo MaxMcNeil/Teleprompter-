@@ -206,7 +206,8 @@ class OverlayService : Service(), RecognitionListener {
         lp = WindowManager.LayoutParams(
             100, 100,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,  // écran allumé tant que le prompteur est affiché
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
         holder = FrameLayout(this).apply { clipChildren = true; addView(root) }
