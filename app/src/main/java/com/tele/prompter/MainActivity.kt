@@ -105,7 +105,7 @@ class MainActivity : Activity() {
             }
         }
         val on = Switch(this).apply { text = "Changer l'écran d'OBS à chaque « ▶ DOSSIER » lu"; isChecked = p.getBoolean("obs_on", false) }
-        val ip = field("Adresse IP du PC (ex. 192.168.1.20)", p.getString("obs_ip", "") ?: "")
+        val ip = field("IP du PC (plusieurs : 192.168.1.7, 192.168.1.11)", p.getString("obs_ip", "") ?: "")
         val port = field("Port (4455)", p.getInt("obs_port", 4455).toString(), num = true)
         val pw = field("Mot de passe du serveur WebSocket d'OBS", p.getString("obs_pw", "") ?: "", pw = true)
         val dir = field("Dossier des écrans sur le PC (ex. C:\\WarRoom)", p.getString("obs_dir", "") ?: "")

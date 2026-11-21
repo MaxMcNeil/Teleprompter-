@@ -31,6 +31,11 @@ class ObsLink(
     @Volatile private var stopped = false       // prompteur fermé
     @Volatile private var want: String? = null       // écran à afficher (renvoyé à chaque (re)connexion)
     private var reqN = 0
+    // Plusieurs adresses possibles (ex. « 192.168.1.7, 192.168.1.11 » : PC en Ethernet ou en Wi-Fi) :
+    // on essaie l'une puis l'autre, et on garde celle qui répond.
+    private val ips = ip.split(',', ';', ' ').map { it.trim() }.filter { it.isNotEmpty() }
+    private var idx = 0
+    private fun cur() = ips.getOrElse(idx) { "" }
 
     fun start() { connect() }
 
@@ -73,9 +78,9 @@ class ObsLink(
 
     private fun connect() {
         if (closed) return
-        if (ip.isBlank()) { state("OBS : adresse IP du PC non réglée", false); return }
-        state("OBS : connexion…", false)
-        ws = client.newWebSocket(Request.Builder().url("ws://${ip.trim()}:$port").build(), object : WebSocketListener() {
+        if (ips.isEmpty()) { state("OBS : adresse IP du PC non réglée", false); return }
+        state("OBS : connexion… (${cur()})", false)
+        ws = client.newWebSocket(Request.Builder().url("ws://${cur()}:$port").build(), object : WebSocketListener() {
             override fun onMessage(w: WebSocket, text: String) {
                 val j = try { JSONObject(text) } catch (_: Exception) { return }
                 val d = j.optJSONObject("d") ?: JSONObject()
@@ -89,7 +94,7 @@ class ObsLink(
                         w.send(JSONObject().put("op", 1).put("d", id).toString())
                     }
                     2 -> {      // Identified
-                        ready = true; state("OBS ✓ connecté", true)
+                        ready = true; state("OBS ✓ connecté (${cur()})", true)
                         want?.let { c -> h.post { if (ready) setClip(c) } }
                     }
                     7 -> {      // réponse à une requête
@@ -113,15 +118,23 @@ class ObsLink(
                 try { w.close(1000, null) } catch (_: Exception) {}
             }
             override fun onClosed(w: WebSocket, code: Int, reason: String) { retry("OBS ✗ déconnecté") }
-            override fun onFailure(w: WebSocket, t: Throwable, r: Response?) { retry("OBS ✗ injoignable (${ip.trim()}:$port)") }
+            override fun onFailure(w: WebSocket, t: Throwable, r: Response?) { retry("OBS ✗ injoignable (${cur()}:$port)", next = true) }
         })
     }
 
-    private fun retry(s: String) {
+    private fun retry(s: String, next: Boolean = false) {
         ready = false
         if (closed) return
-        state("$s · nouvel essai…", false)
         h.removeCallbacksAndMessages(null)
+        // Adresse injoignable et il en reste une autre à essayer : on passe tout de suite à la suivante
+        if (next && ips.size > 1 && idx < ips.size - 1) {
+            idx++
+            state("$s · essai de ${cur()}…", false)
+            h.postDelayed({ connect() }, 300)
+            return
+        }
+        if (next && ips.size > 1) idx = 0                 // tour complet : on recommence par la première
+        state("$s · nouvel essai…", false)
         h.postDelayed({ connect() }, 4000)
     }
 
