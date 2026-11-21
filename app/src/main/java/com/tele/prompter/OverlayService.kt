@@ -192,9 +192,13 @@ class OverlayService : Service(), RecognitionListener {
             setPadding((24 * dp).toInt(), 0, (12 * dp).toInt(), 0)
             layoutParams = LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.END }
         }
+        val war = p.getBoolean("obs_on", false) && markers.isNotEmpty()
+        // Barre du bas : les boutons se partagent la largeur, la poignée ◢ (agrandir / réduire) reste TOUJOURS visible à droite,
+        // quel que soit le nombre de boutons (War Room ajoute ⏮ ⏭)
         fun arrow(t: String, a: () -> Unit) = TextView(this).apply {
-            this.text = t; setTextColor(Color.WHITE); textSize = 24f
-            setPadding((22 * dp).toInt(), (6 * dp).toInt(), (22 * dp).toInt(), (6 * dp).toInt()); setOnClickListener { a() }
+            this.text = t; setTextColor(Color.WHITE); textSize = 24f; gravity = Gravity.CENTER
+            setPadding(0, (6 * dp).toInt(), 0, (6 * dp).toInt()); setOnClickListener { a() }
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         }
         val foot = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -204,15 +208,14 @@ class OverlayService : Service(), RecognitionListener {
                 root.setBackgroundColor((alphas[ai] shl 24) or 0x600000)
                 Toast.makeText(this@OverlayService, "Opacité du fond : ${alphas[ai] * 100 / 255} %", Toast.LENGTH_SHORT).show()
             })
-            val war = p.getBoolean("obs_on", false) && markers.isNotEmpty()
             if (war) { addView(arrow("⏮") { jump(-1) }); addView(arrow("⏭") { jump(1) }) }
-            obsTv = TextView(this@OverlayService).apply {
-                textSize = 11f; setTextColor(Color.WHITE); maxLines = 2; visibility = if (war) View.VISIBLE else View.GONE
-                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-            }
-            addView(obsTv)
-            if (!war) addView(View(this@OverlayService).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
             addView(grip)
+        }
+        // état de la connexion OBS : sur sa propre ligne (ne prend jamais la place de la poignée)
+        obsTv = TextView(this).apply {
+            textSize = 11f; setTextColor(Color.WHITE); maxLines = 1; gravity = Gravity.CENTER
+            visibility = if (war) View.VISIBLE else View.GONE
+            layoutParams = LinearLayout.LayoutParams(-1, -2)
         }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor((alphas[ai] shl 24) or 0x600000)
@@ -229,7 +232,7 @@ class OverlayService : Service(), RecognitionListener {
                 setPadding((6 * dp).toInt(), (2 * dp).toInt(), (6 * dp).toInt(), 0)
                 layoutParams = LinearLayout.LayoutParams(-1, -2)
             }
-            addView(alarm); addView(sv); addView(diag); addView(foot)
+            addView(alarm); addView(sv); addView(diag); addView(obsTv); addView(foot)
         }
         lp = WindowManager.LayoutParams(
             100, 100,
