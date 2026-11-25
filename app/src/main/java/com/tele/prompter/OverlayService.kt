@@ -140,12 +140,14 @@ class OverlayService : Service(), RecognitionListener {
             if (mi < marks.size && it.range.first >= marks[mi].range.first) return@forEach
             val w = norm(it.value); if (w.isNotEmpty()) { words.add(w); st.add(it.range.first); en.add(it.range.last + 1) }
         }
+        // « WAR ROOM VISIBLE » en tête du script = écrans transparents (.webm, ta caméra plein écran derrière) ; sinon .mp4
+        val ext = if (text.trimStart().lineSequence().firstOrNull()?.uppercase()?.contains("WAR ROOM VISIBLE") == true) "webm" else "mp4"
         for (m in marks) {
             val l = m.value.uppercase()
             val clip = when {
-                l.contains("OUVERTURE") -> "wr-00.mp4"
-                l.contains("CLÔTURE") || l.contains("CLOTURE") -> "wr-fin.mp4"
-                else -> Regex("DOSSIER\\s+(\\d+)").find(l)?.let { String.format(java.util.Locale.ROOT, "wr-%02d.mp4", it.groupValues[1].toInt()) }
+                l.contains("OUVERTURE") -> "wr-00.$ext"
+                l.contains("CLÔTURE") || l.contains("CLOTURE") -> "wr-fin.$ext"
+                else -> Regex("DOSSIER\\s+(\\d+)").find(l)?.let { String.format(java.util.Locale.ROOT, "wr-%02d.$ext", it.groupValues[1].toInt()) }
             } ?: continue
             markers.add(Pair(st.count { it < m.range.first }, clip))
         }
@@ -441,7 +443,7 @@ class OverlayService : Service(), RecognitionListener {
         if (markers.isEmpty()) return
         val k = max(0, markers.indexOfLast { it.first <= pos })
         if (k == curSeg) return
-        val alerte = curSeg >= 0 && k > curSeg && markers[k].second != "wr-00.mp4"
+        val alerte = curSeg >= 0 && k > curSeg && !markers[k].second.startsWith("wr-00.")
         curSeg = k
         o.show(markers[k].second, alerte)
     }
